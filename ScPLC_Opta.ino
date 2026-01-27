@@ -91,7 +91,7 @@ static inline bool isHoldingRegWritable(uint16_t addr) {
   if (addr >= 40 && addr <= 45) return true; // CO2 calibration/config
 
   // Control ownership arbitration (reserved for Option B later)
-  if (addr == 100 || addr == 101) return true; // CONTROL_OWNER / CONTROL_CMD_ID
+  if (addr == 100 || addr == 101 || addr == 105) return true; // CONTROL_OWNER / CONTROL_CMD_ID / HMI_HEARTBEAT
 
   // CMD register (write triggers action; firmware clears)
   if (addr == 50) return true;
@@ -405,6 +405,12 @@ const uint16_t HR_CONTROL_CMD_ID                = 101;
 const uint16_t HR_CONTROL_LAST_CHANGE_REASON    = 102;
 const uint16_t HR_CONTROL_LAST_CHANGE_UNIX_S_LO = 103;
 const uint16_t HR_CONTROL_LAST_CHANGE_UNIX_S_HI = 104;
+
+const uint16_t HR_HMI_HEARTBEAT                 = 105; // HMI heartbeat (RW u16; HMI increments)
+
+static const uint32_t HMI_LEASE_TIMEOUT_MS = 5000u; // 5s: if no heartbeat changes, HMI ownership times out
+static uint16_t hmiHeartbeatLastValue = 0;
+static uint32_t hmiHeartbeatLastChangeMs = 0;
 
 static const uint16_t CONTROL_OWNER_NONE = 0;
 static const uint16_t CONTROL_OWNER_HMI  = 1;
@@ -1852,6 +1858,9 @@ void setup() {
   mb_write(HR_CONTROL_LAST_CHANGE_REASON, controlLastChangeReason);
   mb_write(HR_CONTROL_LAST_CHANGE_UNIX_S_LO, 0);
   mb_write(HR_CONTROL_LAST_CHANGE_UNIX_S_HI, 0);
+  mb_write(HR_HMI_HEARTBEAT, 0);
+  hmiHeartbeatLastValue = 0;
+  hmiHeartbeatLastChangeMs = millis();
 #else
   // Legacy custom Modbus TCP server
   // (kept for fallback; not recommended)
@@ -1941,8 +1950,10 @@ void loop() {
       {
         bool ownerWritten = false;
         bool cmdIdWritten = false;
+        bool hbWritten = false;
         uint16_t rawOwner = holdingRegs[HR_CONTROL_OWNER];
         uint16_t rawCmdId = holdingRegs[HR_CONTROL_CMD_ID];
+        uint16_t rawHb = holdingRegs[HR_HMI_HEARTBEAT];
 
         long ownerReg = modbusTCPServer.holdingRegisterRead((int)HR_CONTROL_OWNER);
         if (ownerReg >= 0) {
@@ -1964,11 +1975,43 @@ void loop() {
           }
         }
 
+        long hbReg = modbusTCPServer.holdingRegisterRead((int)HR_HMI_HEARTBEAT);
+        if (hbReg >= 0) {
+          uint16_t v = (uint16_t)hbReg;
+          if (v != holdingRegs[HR_HMI_HEARTBEAT]) {
+            holdingRegs[HR_HMI_HEARTBEAT] = v; // acknowledge raw write to avoid re-trigger
+            rawHb = v;
+            hbWritten = true;
+          }
+        }
+
+        if (hbWritten) {
+          // Heartbeat proof-of-life: only changes matter (wraparound OK).
+          if (rawHb != hmiHeartbeatLastValue) {
+            hmiHeartbeatLastValue = rawHb;
+            hmiHeartbeatLastChangeMs = diagNowMs;
+            // Local-first reclaim: if HMI comes alive, take ownership.
+            if (controlOwner != CONTROL_OWNER_HMI) {
+              setControlOwner(CONTROL_OWNER_HMI, CONTROL_REASON_USER_TAKEOVER, controlCmdId);
+            }
+          }
+        }
+
+        bool leaseValid = ((uint32_t)(diagNowMs - hmiHeartbeatLastChangeMs) < HMI_LEASE_TIMEOUT_MS);
+
         if (ownerWritten || cmdIdWritten) {
           uint16_t clamped = clampControlOwner(rawOwner);
-          // If an invalid owner value was written, we clamp to NONE and treat as FORCED.
-          uint16_t reason = (clamped != rawOwner) ? CONTROL_REASON_FORCED : CONTROL_REASON_USER_TAKEOVER;
-          setControlOwner(clamped, reason, rawCmdId);
+
+          // Takeover guard: while HMI lease is valid, ignore attempts to set owner away from HMI.
+          if (controlOwner == CONTROL_OWNER_HMI && leaseValid && clamped != CONTROL_OWNER_HMI) {
+            holdingRegs[HR_CONTROL_OWNER] = controlOwner;
+            holdingRegs[HR_CONTROL_CMD_ID] = controlCmdId;
+            mb_arm_control_sync(controlOwner, controlCmdId, controlLastChangeReason);
+          } else {
+            // If an invalid owner value was written, we clamp to NONE and treat as FORCED.
+            uint16_t reason = (clamped != rawOwner) ? CONTROL_REASON_FORCED : CONTROL_REASON_USER_TAKEOVER;
+            setControlOwner(clamped, reason, rawCmdId);
+          }
         }
       }
 
@@ -1992,6 +2035,24 @@ void loop() {
     }
 
     mbWasConnected = mbClient.connected();
+
+    // HMI heartbeat lease timeout: if no heartbeat changes arrive, drop HMI ownership to NONE.
+    {
+      uint32_t hbAgeMs = (uint32_t)(diagNowMs - hmiHeartbeatLastChangeMs);
+      bool leaseValid = (hbAgeMs < HMI_LEASE_TIMEOUT_MS);
+      if (controlOwner == CONTROL_OWNER_HMI && !leaseValid) {
+        setControlOwner(CONTROL_OWNER_NONE, CONTROL_REASON_TIMEOUT, controlCmdId);
+        if (!mbClient.connected()) {
+          // No in-flight Modbus response; safe to apply immediately.
+          mb_apply_control_sync_now();
+        }
+        if (Serial) {
+          Serial.print("\n[control] TIMEOUT: owner 1->0 (no hb for ");
+          Serial.print(hbAgeMs);
+          Serial.println("ms)");
+        }
+      }
+    }
 
     // Momentary coil commands: detect set bits, act once, then reset coil.
     // (Coil/register table is shared across all clients.)
