@@ -67,6 +67,11 @@ static uint32_t mbReqCount  = 0;
 static uint32_t mbLastReqMs = 0;
 
 #if USE_ARDUINO_MODBUS
+// Modbus TCP single-client idle timeout.
+// If a client holds the TCP socket open but stops sending Modbus requests (e.g., HMI sleep),
+// we drop it so another client (e.g., Pi) can connect.
+static const uint32_t MB_IDLE_TIMEOUT_MS = 5000u;
+
 // Deferred RO restore flag.
 // We intentionally do NOT write holding registers back in the same loop() iteration as
 // modbusTCPServer.poll(), because doing so can corrupt the in-flight Modbus TCP response
@@ -1926,6 +1931,9 @@ void loop() {
         mbClient.setTimeout(200);
         // IMPORTANT: accept() must be called only once per connection.
         modbusTCPServer.accept(mbClient);
+        // Option A: initialize idle timer immediately on accept so idle timeout works
+        // even if the client never successfully sends a Modbus request.
+        mbLastReqMs = diagNowMs;
         mbAccepts++;
         if (Serial) {
           Serial.print("\n[MB] client connected from ");
@@ -1944,6 +1952,17 @@ void loop() {
         mbReqCount += (uint32_t)handled;
         mbLastReqMs = diagNowMs;
       }
+
+      // Idle/inactivity timeout: drop client if it holds the socket but stops sending requests.
+      // Must be checked AFTER poll() and AFTER updating mbLastReqMs on handled requests.
+      uint32_t age = mbLastReqMs ? (uint32_t)(diagNowMs - mbLastReqMs) : 0;
+      if (age > MB_IDLE_TIMEOUT_MS) {
+        if (Serial) Serial.print("\n[MB] idle timeout -> dropping client");
+        mbDisconnects++;
+        mbClient.stop();
+        // Apply any deferred control-reg sync now that no response is in flight.
+        mb_apply_control_sync_now();
+      } else {
 
       // Detect external writes to control ownership regs (after poll).
       // Do NOT write any registers in this same iteration; only arm a deferred sync.
@@ -2032,6 +2051,7 @@ void loop() {
 
       // Apply any deferred control-reg writes once we're safely past the poll that armed them.
       mb_apply_control_sync_if_armed();
+      }
     }
 
     mbWasConnected = mbClient.connected();
