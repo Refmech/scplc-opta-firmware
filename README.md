@@ -55,10 +55,12 @@ If you deploy onto a different subnet, update `optaIp`, `optaDns`, `optaGateway`
 - To prevent a “stuck connected” client (e.g., HMI sleeping while keeping its TCP socket open, or a dead peer/cable unplug), the firmware enforces an **inactivity timeout**:
   - If no Modbus requests are handled for longer than `MB_IDLE_TIMEOUT_MS`, the firmware force-drops the client.
   - Default: `MB_IDLE_TIMEOUT_MS = 5000` (5 seconds).
+  - This drop is **forced even if the TCP stack still reports the socket as connected**.
 
 Diagnostics you’ll see on Serial:
 - `mbLastReqMs` is the last timestamp (ms) when a Modbus request was handled.
 - `lastReqAgeMs` is the age since the last handled Modbus request (it increases when the client is idle/silent).
+- When the timeout triggers, the firmware prints: `[MB] idle timeout drop ageMs=...`
 - Expected behavior: when the HMI goes idle or the client disappears, `clientConnected` will drop back to `0` within ~5 seconds, allowing another client (e.g., the Pi) to connect.
 
 ### Addressing conventions
