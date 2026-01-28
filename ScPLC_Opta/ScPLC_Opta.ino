@@ -1917,6 +1917,9 @@ void loop() {
       mbDisconnects++;
       if (Serial) Serial.print("\n[MB] client disconnected");
       mbClient.stop();
+      // Some Ethernet stacks can report connected() true for a while after stop()/peer loss.
+      // Reset the client object so clientConnected drops immediately and a new client can be accepted.
+      mbClient = EthernetClient();
 
       // If any deferred control-reg sync is pending, apply now (no in-flight response).
       mb_apply_control_sync_now();
@@ -1963,6 +1966,8 @@ void loop() {
         }
         mbDisconnects++;
         mbClient.stop();
+        // Force release even if connected() stays true (e.g., cable unplug / peer vanished).
+        mbClient = EthernetClient();
         // Apply any deferred control-reg sync now that no response is in flight.
         mb_apply_control_sync_now();
       } else {
