@@ -1957,7 +1957,10 @@ void loop() {
       // Must be checked AFTER poll() and AFTER updating mbLastReqMs on handled requests.
       uint32_t age = mbLastReqMs ? (uint32_t)(diagNowMs - mbLastReqMs) : 0;
       if (age > MB_IDLE_TIMEOUT_MS) {
-        if (Serial) Serial.print("\n[MB] idle timeout -> dropping client");
+        if (Serial) {
+          Serial.print("\n[MB] idle timeout drop ageMs=");
+          Serial.print(age);
+        }
         mbDisconnects++;
         mbClient.stop();
         // Apply any deferred control-reg sync now that no response is in flight.
