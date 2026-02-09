@@ -126,6 +126,7 @@ static inline bool mb_detect_ro_violations() {
   if (mb_ro_violation_in_range(19, 20)) return true;
   if (mb_ro_violation_in_range(60, 67)) return true;
   if (mb_ro_violation_in_range(70, 71)) return true;
+  if (mb_ro_violation_in_range(180, 180)) return true;
   if (mb_ro_violation_in_range(51, 51)) return true;
   return false;
 }
@@ -148,6 +149,7 @@ static inline void mb_restore_ro_holding_registers() {
   mb_restore_ro_range(19, 20);
   mb_restore_ro_range(60, 67);
   mb_restore_ro_range(70, 71);
+  mb_restore_ro_range(180, 180);
   mb_restore_ro_range(51, 51);
 }
 #endif
@@ -306,6 +308,9 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //  - HR19..20  (u16):   Room mode / Step
 //  - HR60..67  (diag):  A0602 raw/mA/%/mode diagnostics
 //  - HR70..71  (diag):  CO2 quick mismatch checks
+//  - HR180     (u16):   outputs_mask (bit0 D0, bit1 D1, bit2 D2, bit3 D3,
+//                       bit4 R1, bit5 R2, bit6 R3, bit7 R4, bit8 R5, bit9 R6,
+//                       bit10 R7, bit11 R8)
 //
 // RW (read/write; client may write, Opta clamps/applies when commanded):
 //  - HR30..35  (scaled): O2 calibration/config
@@ -339,6 +344,7 @@ const uint16_t HR_O2_MEAS   = 10; // 40011 (% * 100)
 const uint16_t HR_CO2_MEAS  = 11; // 40012 (% * 100)
 const uint16_t HR_ROOM_MODE = 19; // 40020
 const uint16_t HR_STEP      = 20; // 40021
+const uint16_t HR_OUTPUTS_MASK = 180; // outputs bitmask snapshot
 
 // Calibration (setpoints) registers (Pi writes, Opta clamps/applies)
 // Values are scaled integers:
@@ -1120,11 +1126,44 @@ static void updateSensors2Hz(uint32_t nowMs) {
   mb_write(HR_CO2_MEAS, co2Scaled);
 }
 
+// Output state tracking for Modbus snapshot (do not rely on digitalRead)
+static bool outputPinState[4] = { false, false, false, false }; // D0..D3
+static bool relayState[9] = { false, false, false, false, false, false, false, false, false }; // 1..8
+
+static inline void updateOutputsSnapshot() {
+  uint16_t mask = 0;
+  if (outputPinState[0]) mask |= (1u << 0);
+  if (outputPinState[1]) mask |= (1u << 1);
+  if (outputPinState[2]) mask |= (1u << 2);
+  if (outputPinState[3]) mask |= (1u << 3);
+  for (uint8_t i = 1; i <= 8; i++) {
+    if (relayState[i]) mask |= (uint16_t)(1u << (i + 3)); // relay1 -> bit4
+  }
+  mb_write(HR_OUTPUTS_MASK, mask);
+}
+
+static inline void setOutputPin(int pin, bool on) {
+  digitalWrite(pin, on ? HIGH : LOW);
+  if (pin == PIN_FAN_1) outputPinState[0] = on;
+  else if (pin == PIN_FAN_2) outputPinState[1] = on;
+  else if (pin == PIN_RM_V_1) outputPinState[2] = on;
+  else if (pin == PIN_N2_RM_V_1) outputPinState[3] = on;
+  updateOutputsSnapshot();
+}
+
+static inline void setRelayState(int relayIndex, bool on) {
+  if (relayIndex >= 1 && relayIndex <= 8) {
+    relayState[relayIndex] = on;
+    updateOutputsSnapshot();
+  }
+}
+
 // Drive D1608E relays via DigitalExpansion
 void setRelay(int relayIndex, bool on) {
   #ifdef HAVE_OPTA_BLUE
   if (digitalExpIndex < 0) {
     Serial.println("[Relay] No digital expansion detected; skipping write");
+    setRelayState(relayIndex, on);
     return;
   }
   ExpansionType_t type = OptaController.getExpansionType(digitalExpIndex);
@@ -1157,6 +1196,7 @@ void setRelay(int relayIndex, bool on) {
 
   // Mirror relay state to built-in LED
   mirrorRelayToLed(relayIndex, on);
+  setRelayState(relayIndex, on);
 }
 
 // -----------------------------------------------------------------------------
@@ -1165,10 +1205,10 @@ void setRelay(int relayIndex, bool on) {
 
 void setAllOutputsOff() {
   if (LOG_ACTIONS) Serial.println("Action: setAllOutputsOff");
-  digitalWrite(PIN_FAN_1, LOW);
-  digitalWrite(PIN_FAN_2, LOW);
-  digitalWrite(PIN_RM_V_1, LOW);
-  digitalWrite(PIN_N2_RM_V_1, LOW);
+  setOutputPin(PIN_FAN_1, LOW);
+  setOutputPin(PIN_FAN_2, LOW);
+  setOutputPin(PIN_RM_V_1, LOW);
+  setOutputPin(PIN_N2_RM_V_1, LOW);
 
   setRelay(REL_MEAS_P,     false);
   setRelay(REL_V_4_4,      false);
@@ -1194,6 +1234,7 @@ static void relaySeqSetRelay(uint8_t relayIndex1Based, bool on) {
   #ifdef HAVE_OPTA_BLUE
   if (digitalExpIndex < 0 || relayIndex1Based < 1 || relayIndex1Based > 8) {
     Serial.println("[RelaySeq] No digital expansion; skipping");
+    setRelayState(relayIndex1Based, on);
     return;
   }
   ExpansionType_t type = OptaController.getExpansionType(digitalExpIndex);
@@ -1217,6 +1258,7 @@ static void relaySeqSetRelay(uint8_t relayIndex1Based, bool on) {
   #endif
   // Mirror to onboard LED for quick visual confirmation
   mirrorRelayToLed(relayIndex1Based, on);
+  setRelayState(relayIndex1Based, on);
 }
 
 static void relaySeqSetAllOff() {
@@ -1248,9 +1290,9 @@ static void relaySeqStop() {
 // Measurement cycle: Fan_1, Fan_2, V_2_3, V_4_4, RM_V_1, Meas_P, Meas_V_A_I
 void applyMeasurementOutputs() {
   if (LOG_ACTIONS) Serial.println("Action: applyMeasurementOutputs");
-  digitalWrite(PIN_FAN_1, HIGH);
-  digitalWrite(PIN_FAN_2, HIGH);
-  digitalWrite(PIN_RM_V_1, HIGH);
+  setOutputPin(PIN_FAN_1, HIGH);
+  setOutputPin(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_RM_V_1, HIGH);
   setRelay(REL_V_2_3,      true);
   setRelay(REL_V_4_4,      true);
   setRelay(REL_MEAS_P,     true);
@@ -1260,9 +1302,9 @@ void applyMeasurementOutputs() {
 // Aeration part 1: Fan_2, V_1_1, V_2_3, V_4_4, RM_V_1
 void applyAerationPart1Outputs() {
   Serial.println("Action: applyAerationPart1Outputs");
-  digitalWrite(PIN_FAN_1, LOW);
-  digitalWrite(PIN_FAN_2, HIGH);
-  digitalWrite(PIN_RM_V_1, HIGH);
+  setOutputPin(PIN_FAN_1, LOW);
+  setOutputPin(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_RM_V_1, HIGH);
   setRelay(REL_V_1_1, true);
   setRelay(REL_V_2_3, true);
   setRelay(REL_V_4_4, true);
@@ -1271,9 +1313,9 @@ void applyAerationPart1Outputs() {
 // Aeration part 2: Fan_1, Fan_2, V_1_1, V_2_3, V_4_4, RM_V_1
 void applyAerationPart2Outputs() {
   Serial.println("Action: applyAerationPart2Outputs");
-  digitalWrite(PIN_FAN_1, HIGH);
-  digitalWrite(PIN_FAN_2, HIGH);
-  digitalWrite(PIN_RM_V_1, HIGH);
+  setOutputPin(PIN_FAN_1, HIGH);
+  setOutputPin(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_RM_V_1, HIGH);
   setRelay(REL_V_1_1, true);
   setRelay(REL_V_2_3, true);
   setRelay(REL_V_4_4, true);
@@ -1282,9 +1324,9 @@ void applyAerationPart2Outputs() {
 // Config 1 - Ads/Reg part 1: Fan_1, Fan_2, V_2_3, V_4_4, RM_V_1, Meas_P, Meas_V_A_O
 void applyCfg1_AdsReg1Outputs() {
   Serial.println("Action: applyCfg1_AdsReg1Outputs");
-  digitalWrite(PIN_FAN_1, HIGH);
-  digitalWrite(PIN_FAN_2, HIGH);
-  digitalWrite(PIN_RM_V_1, HIGH);
+  setOutputPin(PIN_FAN_1, HIGH);
+  setOutputPin(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_RM_V_1, HIGH);
   setRelay(REL_V_2_3,      true);
   setRelay(REL_V_4_4,      true);
   setRelay(REL_MEAS_P,     true);
@@ -1294,9 +1336,9 @@ void applyCfg1_AdsReg1Outputs() {
 // Config 1 - Ads/Reg part 2: Fan_1, Fan_2, V_2_3, V_4_4, RM_V_1
 void applyCfg1_AdsReg2Outputs() {
   Serial.println("Action: applyCfg1_AdsReg2Outputs");
-  digitalWrite(PIN_FAN_1, HIGH);
-  digitalWrite(PIN_FAN_2, HIGH);
-  digitalWrite(PIN_RM_V_1, HIGH);
+  setOutputPin(PIN_FAN_1, HIGH);
+  setOutputPin(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_RM_V_1, HIGH);
   setRelay(REL_V_2_3, true);
   setRelay(REL_V_4_4, true);
 }
@@ -1304,8 +1346,8 @@ void applyCfg1_AdsReg2Outputs() {
 // Config 1 - Extra Regen Cylinder #1: Fan_2, V_2_3
 void applyCfg1_XtrRegenOutputs() {
   Serial.println("Action: applyCfg1_XtrRegenOutputs");
-  digitalWrite(PIN_FAN_1, LOW);
-  digitalWrite(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_FAN_1, LOW);
+  setOutputPin(PIN_FAN_2, HIGH);
   setRelay(REL_V_2_3, true);
   setRelay(REL_V_4_4, false);
 }
@@ -1313,26 +1355,26 @@ void applyCfg1_XtrRegenOutputs() {
 // Config 1 - Wait: V_4_4
 void applyCfg1_WaitOutputs() {
   Serial.println("Action: applyCfg1_WaitOutputs");
-  digitalWrite(PIN_FAN_1, LOW);
-  digitalWrite(PIN_FAN_2, LOW);
+  setOutputPin(PIN_FAN_1, LOW);
+  setOutputPin(PIN_FAN_2, LOW);
   setRelay(REL_V_4_4, true);
 }
 
 // Config 1 - Room MT/Fill: Fan_1, Fan_2, V_2_3, RM_V_1
 void applyCfg1_RmMtFillOutputs() {
   Serial.println("Action: applyCfg1_RmMtFillOutputs");
-  digitalWrite(PIN_FAN_1, HIGH);
-  digitalWrite(PIN_FAN_2, HIGH);
-  digitalWrite(PIN_RM_V_1, HIGH);
+  setOutputPin(PIN_FAN_1, HIGH);
+  setOutputPin(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_RM_V_1, HIGH);
   setRelay(REL_V_2_3, true);
 }
 
 // Config 2 - Ads/Reg part 1: Fan_1, Fan_2, V_1_1, RM_V_1, Meas_P, Meas_V_A_O
 void applyCfg2_AdsReg1Outputs() {
   Serial.println("Action: applyCfg2_AdsReg1Outputs");
-  digitalWrite(PIN_FAN_1, HIGH);
-  digitalWrite(PIN_FAN_2, HIGH);
-  digitalWrite(PIN_RM_V_1, HIGH);
+  setOutputPin(PIN_FAN_1, HIGH);
+  setOutputPin(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_RM_V_1, HIGH);
   setRelay(REL_V_1_1,      true);
   setRelay(REL_MEAS_P,     true);
   // Removed: calibration valve not used in scrub ads/reg sequences
@@ -1341,34 +1383,34 @@ void applyCfg2_AdsReg1Outputs() {
 // Config 2 - Ads/Reg part 2: Fan_1, Fan_2, V_1_1, RM_V_1
 void applyCfg2_AdsReg2Outputs() {
   Serial.println("Action: applyCfg2_AdsReg2Outputs");
-  digitalWrite(PIN_FAN_1, HIGH);
-  digitalWrite(PIN_FAN_2, HIGH);
-  digitalWrite(PIN_RM_V_1, HIGH);
+  setOutputPin(PIN_FAN_1, HIGH);
+  setOutputPin(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_RM_V_1, HIGH);
   setRelay(REL_V_1_1, true);
 }
 
 // Config 2 - Extra Regen Cylinder #1: Fan_2, V_1_1
 void applyCfg2_XtrRegenOutputs() {
   Serial.println("Action: applyCfg2_XtrRegenOutputs");
-  digitalWrite(PIN_FAN_1, LOW);
-  digitalWrite(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_FAN_1, LOW);
+  setOutputPin(PIN_FAN_2, HIGH);
   setRelay(REL_V_1_1, true);
 }
 
 // Config 2 - Wait: V_1_1
 void applyCfg2_WaitOutputs() {
   Serial.println("Action: applyCfg2_WaitOutputs");
-  digitalWrite(PIN_FAN_1, LOW);
-  digitalWrite(PIN_FAN_2, LOW);
+  setOutputPin(PIN_FAN_1, LOW);
+  setOutputPin(PIN_FAN_2, LOW);
   setRelay(REL_V_1_1, true);
 }
 
 // Config 2 - Room MT/Fill: Fan_1, Fan_2, V_2_3, RM_V_1
 void applyCfg2_RmMtFillOutputs() {
   Serial.println("Action: applyCfg2_RmMtFillOutputs");
-  digitalWrite(PIN_FAN_1, HIGH);
-  digitalWrite(PIN_FAN_2, HIGH);
-  digitalWrite(PIN_RM_V_1, HIGH);
+  setOutputPin(PIN_FAN_1, HIGH);
+  setOutputPin(PIN_FAN_2, HIGH);
+  setOutputPin(PIN_RM_V_1, HIGH);
   setRelay(REL_V_2_3, true);
 }
 
@@ -1441,10 +1483,10 @@ void handleMeasurement() {
 
 void applyCalibrationOutputs() {
   // Only measuring pump and calibration valve ON; everything else OFF
-  digitalWrite(PIN_FAN_1, LOW);
-  digitalWrite(PIN_FAN_2, LOW);
-  digitalWrite(PIN_RM_V_1, LOW);
-  digitalWrite(PIN_N2_RM_V_1, LOW);
+  setOutputPin(PIN_FAN_1, LOW);
+  setOutputPin(PIN_FAN_2, LOW);
+  setOutputPin(PIN_RM_V_1, LOW);
+  setOutputPin(PIN_N2_RM_V_1, LOW);
   setRelay(REL_V_4_4,      false);
   setRelay(REL_V_2_3,      false);
   setRelay(REL_V_1_1,      false);

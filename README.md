@@ -87,6 +87,19 @@ Read-only (firmware-owned):
 - `19`: Room mode
 - `20`: Current step
 - `60..71`: Diagnostics (A0602 raw/mA/%/mode and CO2 mismatch checks)
+- `180`: Outputs bitmask (`outputs_mask`)
+  - bit0 D0 (PIN_FAN_1)
+  - bit1 D1 (PIN_FAN_2)
+  - bit2 D2 (PIN_RM_V_1)
+  - bit3 D3 (PIN_N2_RM_V_1)
+  - bit4 Relay1 (REL_MEAS_P)
+  - bit5 Relay2 (REL_V_4_4)
+  - bit6 Relay3 (REL_V_2_3)
+  - bit7 Relay4 (REL_V_1_1)
+  - bit8 Relay5 (REL_M_V_N2_GEN)
+  - bit9 Relay6 (REL_MEAS_V_CAL)
+  - bit10 Relay7 (REL_MEAS_V_A_I)
+  - bit11 Relay8 (REL_N2_REC_V)
 
 Read/write (setpoints/config):
 - `30..35`: O2 calibration/config
