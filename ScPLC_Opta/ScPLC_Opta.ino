@@ -39,6 +39,7 @@ static const bool LOG_HEARTBEAT   = true;  // periodic heartbeat / readings
 static const bool LOG_DISCOVERY   = true;  // expansion discovery/rescan logs
 static const bool LOG_SWEEP_EVENTS= true;  // sweep BEGIN/STOP messages
 static const bool LOG_A0602_DIAG  = true;  // once-per-second analog mode/raw/mA/% logs
+static const bool LOG_OUTPUTS_MASK = false; // outputs mask writes (HR180)
 
 // Use ArduinoModbus for a standards-compliant Modbus TCP server.
 // Set to 0 to temporarily fall back to the legacy custom parser.
@@ -1140,6 +1141,10 @@ static inline void updateOutputsSnapshot() {
     if (relayState[i]) mask |= (uint16_t)(1u << (i + 3)); // relay1 -> bit4
   }
   mb_write(HR_OUTPUTS_MASK, mask);
+  if (LOG_OUTPUTS_MASK && Serial) {
+    Serial.print("[outputs] HR180=0x");
+    Serial.println(mask, HEX);
+  }
 }
 
 static inline void setOutputPin(int pin, bool on) {
