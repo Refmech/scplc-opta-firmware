@@ -1144,17 +1144,20 @@ static inline void updateOutputsSnapshot() {
 
 static inline void setOutputPin(int pin, bool on) {
   digitalWrite(pin, on ? HIGH : LOW);
-  if (pin == PIN_FAN_1) outputPinState[0] = on;
-  else if (pin == PIN_FAN_2) outputPinState[1] = on;
-  else if (pin == PIN_RM_V_1) outputPinState[2] = on;
-  else if (pin == PIN_N2_RM_V_1) outputPinState[3] = on;
-  updateOutputsSnapshot();
+  bool changed = false;
+  if (pin == PIN_FAN_1) { changed = (outputPinState[0] != on); outputPinState[0] = on; }
+  else if (pin == PIN_FAN_2) { changed = (outputPinState[1] != on); outputPinState[1] = on; }
+  else if (pin == PIN_RM_V_1) { changed = (outputPinState[2] != on); outputPinState[2] = on; }
+  else if (pin == PIN_N2_RM_V_1) { changed = (outputPinState[3] != on); outputPinState[3] = on; }
+  if (changed) updateOutputsSnapshot();
 }
 
 static inline void setRelayState(int relayIndex, bool on) {
   if (relayIndex >= 1 && relayIndex <= 8) {
-    relayState[relayIndex] = on;
-    updateOutputsSnapshot();
+    if (relayState[relayIndex] != on) {
+      relayState[relayIndex] = on;
+      updateOutputsSnapshot();
+    }
   }
 }
 
