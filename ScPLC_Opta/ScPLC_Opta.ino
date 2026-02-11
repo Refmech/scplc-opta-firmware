@@ -39,7 +39,7 @@ static const bool LOG_HEARTBEAT   = true;  // periodic heartbeat / readings
 static const bool LOG_DISCOVERY   = true;  // expansion discovery/rescan logs
 static const bool LOG_SWEEP_EVENTS= true;  // sweep BEGIN/STOP messages
 static const bool LOG_A0602_DIAG  = true;  // once-per-second analog mode/raw/mA/% logs
-static const bool LOG_OUTPUTS_MASK = false; // outputs mask writes (HR180)
+static const bool LOG_OUTPUTS_MASK = true; // outputs mask writes (HR180)
 
 // Use ArduinoModbus for a standards-compliant Modbus TCP server.
 // Set to 0 to temporarily fall back to the legacy custom parser.
