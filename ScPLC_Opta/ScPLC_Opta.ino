@@ -1225,12 +1225,16 @@ void setAllOutputsOff() {
 // -----------------------------------------------------------------------------
 
 static const unsigned long RELAY_ON_TIME_MS = 1000UL;
-static bool relaySeqRunning = false;
-static uint8_t relaySeqCurrent = 0; // 1..8
-static bool relaySeqPhaseOn = false; // true when relay is ON
-static unsigned long relaySeqPhaseStartMs = 0;
+struct RelaySweepState {
+  bool sweep_active;
+  uint8_t current_relay_index; // 1..8
+  uint32_t last_transition_ms;
+  bool phase_on;
+};
 
-static void relaySeqSetRelay(uint8_t relayIndex1Based, bool on) {
+static RelaySweepState relaySweep = { false, 0, 0, false };
+
+static void relaySweepSetRelay(uint8_t relayIndex1Based, bool on) {
   #ifdef HAVE_OPTA_BLUE
   if (digitalExpIndex < 0 || relayIndex1Based < 1 || relayIndex1Based > 8) {
     Serial.println("[RelaySeq] No digital expansion; skipping");
@@ -1261,30 +1265,59 @@ static void relaySeqSetRelay(uint8_t relayIndex1Based, bool on) {
   setRelayState(relayIndex1Based, on);
 }
 
-static void relaySeqSetAllOff() {
-  for (uint8_t i = 1; i <= 8; ++i) relaySeqSetRelay(i, false);
+static void relaySweepSetAllOff() {
+  relaySweepSetRelay(1, false);
+  relaySweepSetRelay(2, false);
+  relaySweepSetRelay(3, false);
+  relaySweepSetRelay(4, false);
+  relaySweepSetRelay(5, false);
+  relaySweepSetRelay(6, false);
+  relaySweepSetRelay(7, false);
+  relaySweepSetRelay(8, false);
 }
 
-static void relaySeqBegin() {
+static void relaySweepBegin() {
   // Sanity: ensure digital expansion present before attempting
   if (digitalExpIndex < 0) {
     Serial.println("[RelaySeq] Digital expansion not detected (index=-1). Check 24V/backplane.");
   }
-  relaySeqRunning = true;
-  relaySeqCurrent = 1;
-  relaySeqPhaseOn = true;
-  relaySeqPhaseStartMs = millis();
-  relaySeqSetAllOff();
-  relaySeqSetRelay(relaySeqCurrent, true);
+  relaySweep.sweep_active = true;
+  relaySweep.current_relay_index = 1;
+  relaySweep.phase_on = true;
+  relaySweep.last_transition_ms = millis();
+  relaySweepSetAllOff();
+  relaySweepSetRelay(relaySweep.current_relay_index, true);
   if (LOG_SWEEP_EVENTS) Serial.println("Relay sequencer: start");
 }
 
-static void relaySeqStop() {
-  relaySeqSetAllOff();
-  relaySeqRunning = false;
-  relaySeqCurrent = 0;
-  relaySeqPhaseOn = false;
+static void relaySweepStop() {
+  relaySweepSetAllOff();
+  relaySweep.sweep_active = false;
+  relaySweep.current_relay_index = 0;
+  relaySweep.phase_on = false;
   if (LOG_SWEEP_EVENTS) Serial.println("Relay sequencer: finished");
+}
+
+static inline void relaySweepTick(uint32_t nowMs) {
+  if (!relaySweep.sweep_active) return;
+
+  if (relaySweep.phase_on) {
+    if ((uint32_t)(nowMs - relaySweep.last_transition_ms) >= RELAY_ON_TIME_MS) {
+      relaySweepSetRelay(relaySweep.current_relay_index, false);
+      relaySweep.phase_on = false;
+      relaySweep.last_transition_ms = nowMs;
+    }
+    return;
+  }
+
+  if (relaySweep.current_relay_index < 8) {
+    relaySweep.current_relay_index++;
+    relaySweepSetRelay(relaySweep.current_relay_index, true);
+    relaySweep.phase_on = true;
+    relaySweep.last_transition_ms = nowMs;
+  } else {
+    relaySweepStop();
+  }
 }
 
 // Measurement cycle: Fan_1, Fan_2, V_2_3, V_4_4, RM_V_1, Meas_P, Meas_V_A_I
@@ -2158,10 +2191,10 @@ void loop() {
       lastCoil4 = coil4;
       if (coil4) {
         if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 -> relay sequencer BEGIN");
-        relaySeqBegin();
+        relaySweepBegin();
       } else {
         if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=0 -> relay sequencer STOP");
-        relaySeqStop();
+        relaySweepStop();
       }
     }
 
@@ -2271,27 +2304,8 @@ void loop() {
       break;
   }
 
-  // Drive relay sequencer when active
-  if (relaySeqRunning) {
-    unsigned long nowMs = millis();
-    if (relaySeqPhaseOn) {
-      if (nowMs - relaySeqPhaseStartMs >= RELAY_ON_TIME_MS) {
-        // Turn current relay off
-        relaySeqSetRelay(relaySeqCurrent, false);
-        relaySeqPhaseOn = false;
-        relaySeqPhaseStartMs = nowMs;
-      }
-    } else {
-      if (relaySeqCurrent < 8) {
-        relaySeqCurrent++;
-        relaySeqSetRelay(relaySeqCurrent, true);
-        relaySeqPhaseOn = true;
-        relaySeqPhaseStartMs = nowMs;
-      } else {
-        relaySeqStop();
-      }
-    }
-  }
+  // Drive relay sweep state machine when active
+  relaySweepTick(millis());
 
   // Optional: print latest readings/heartbeat
   #if 1
