@@ -29,7 +29,7 @@ This repository contains the Arduino firmware for the **ScPLC Opta** controller 
    - `Ethernet`
    - `ArduinoRS485`
    - `ArduinoModbus`
-   - `OptaBlue` (Opta expansion support)
+  - `Arduino_Opta_Blueprint` (provides `OptaBlue.h` for Opta expansions)
 4. Compile and upload.
 
 ### Notes
