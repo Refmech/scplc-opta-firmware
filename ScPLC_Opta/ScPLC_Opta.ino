@@ -1225,14 +1225,27 @@ void setAllOutputsOff() {
 // -----------------------------------------------------------------------------
 
 static const unsigned long RELAY_ON_TIME_MS = 2000UL;
+static const uint8_t SWEEP_OUTPUT_COUNT = 12; // D0..D3, then Relay1..Relay8
 struct RelaySweepState {
   bool sweep_active;
-  uint8_t current_relay_index; // 1..8
+  uint8_t current_output_index; // 1..12
   uint32_t last_transition_ms;
   bool phase_on;
 };
 
 static RelaySweepState relaySweep = { false, 0, 0, false };
+
+static void relaySweepSetRelay(uint8_t relayIndex1Based, bool on);
+
+static void relaySweepSetOutput(uint8_t outputIndex1Based, bool on) {
+  if (outputIndex1Based == 1) { setOutputPin(PIN_FAN_1, on); return; }      // D0
+  if (outputIndex1Based == 2) { setOutputPin(PIN_FAN_2, on); return; }      // D1
+  if (outputIndex1Based == 3) { setOutputPin(PIN_RM_V_1, on); return; }     // D2
+  if (outputIndex1Based == 4) { setOutputPin(PIN_N2_RM_V_1, on); return; }  // D3
+  if (outputIndex1Based >= 5 && outputIndex1Based <= SWEEP_OUTPUT_COUNT) {
+    relaySweepSetRelay((uint8_t)(outputIndex1Based - 4), on); // relay1..relay8
+  }
+}
 
 static void relaySweepSetRelay(uint8_t relayIndex1Based, bool on) {
   #ifdef HAVE_OPTA_BLUE
@@ -1266,14 +1279,9 @@ static void relaySweepSetRelay(uint8_t relayIndex1Based, bool on) {
 }
 
 static void relaySweepSetAllOff() {
-  relaySweepSetRelay(1, false);
-  relaySweepSetRelay(2, false);
-  relaySweepSetRelay(3, false);
-  relaySweepSetRelay(4, false);
-  relaySweepSetRelay(5, false);
-  relaySweepSetRelay(6, false);
-  relaySweepSetRelay(7, false);
-  relaySweepSetRelay(8, false);
+  for (uint8_t i = 1; i <= SWEEP_OUTPUT_COUNT; i++) {
+    relaySweepSetOutput(i, false);
+  }
 }
 
 static void relaySweepBegin() {
@@ -1282,18 +1290,18 @@ static void relaySweepBegin() {
     Serial.println("[RelaySeq] Digital expansion not detected (index=-1). Check 24V/backplane.");
   }
   relaySweep.sweep_active = true;
-  relaySweep.current_relay_index = 1;
+  relaySweep.current_output_index = 1;
   relaySweep.phase_on = true;
   relaySweep.last_transition_ms = millis();
   relaySweepSetAllOff();
-  relaySweepSetRelay(relaySweep.current_relay_index, true);
+  relaySweepSetOutput(relaySweep.current_output_index, true);
   if (LOG_SWEEP_EVENTS) Serial.println("Relay sequencer: start");
 }
 
 static void relaySweepStop() {
   relaySweepSetAllOff();
   relaySweep.sweep_active = false;
-  relaySweep.current_relay_index = 0;
+  relaySweep.current_output_index = 0;
   relaySweep.phase_on = false;
   if (LOG_SWEEP_EVENTS) Serial.println("Relay sequencer: finished");
 }
@@ -1303,16 +1311,16 @@ static inline void relaySweepTick(uint32_t nowMs) {
 
   if (relaySweep.phase_on) {
     if ((uint32_t)(nowMs - relaySweep.last_transition_ms) >= RELAY_ON_TIME_MS) {
-      relaySweepSetRelay(relaySweep.current_relay_index, false);
+      relaySweepSetOutput(relaySweep.current_output_index, false);
       relaySweep.phase_on = false;
       relaySweep.last_transition_ms = nowMs;
     }
     return;
   }
 
-  if (relaySweep.current_relay_index < 8) {
-    relaySweep.current_relay_index++;
-    relaySweepSetRelay(relaySweep.current_relay_index, true);
+  if (relaySweep.current_output_index < SWEEP_OUTPUT_COUNT) {
+    relaySweep.current_output_index++;
+    relaySweepSetOutput(relaySweep.current_output_index, true);
     relaySweep.phase_on = true;
     relaySweep.last_transition_ms = nowMs;
   } else {
