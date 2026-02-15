@@ -1224,7 +1224,7 @@ void setAllOutputsOff() {
 // Relay sequencer (D1608E) test logic inspired by Opta_MA_testing
 // -----------------------------------------------------------------------------
 
-static const unsigned long RELAY_ON_TIME_MS = 1000UL;
+static const unsigned long RELAY_ON_TIME_MS = 2000UL;
 struct RelaySweepState {
   bool sweep_active;
   uint8_t current_relay_index; // 1..8
