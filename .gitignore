@@ -1,1 +1,29 @@
-﻿# ScPLC Opta firmware\r\n\r\n# Arduino / PlatformIO / build outputs\r\nbuild/\r\n.pio/\r\n.arduino/\r\n\r\n# Tooling\r\n.vscode/\r\n.idea/\r\n.vs/\r\n*.code-workspace\r\n\r\n# Compiled artifacts\r\n*.o\r\n*.a\r\n*.d\r\n*.elf\r\n*.bin\r\n*.hex\r\n*.map\r\n*.lst\r\n\r\n# OS / editor junk\r\n.DS_Store\r\nThumbs.db\r\nDesktop.ini\r\n*.swp\r\n*~\r\n
+﻿# ScPLC Opta firmware
+
+# Arduino / PlatformIO / build outputs
+build/
+.pio/
+.arduino/
+
+# Tooling
+.vscode/
+.idea/
+.vs/
+*.code-workspace
+
+# Compiled artifacts
+*.o
+*.a
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
