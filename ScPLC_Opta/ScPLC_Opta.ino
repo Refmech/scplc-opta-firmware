@@ -1142,7 +1142,7 @@ static void updateSensors2Hz(uint32_t nowMs) {
 static bool outputPinState[4] = { false, false, false, false }; // D0..D3
 static bool relayState[9] = { false, false, false, false, false, false, false, false, false }; // 1..8
 
-static inline void updateOutputsSnapshot() {
+static inline uint16_t updateOutputsSnapshot() {
   uint16_t mask = 0;
   if (outputPinState[0]) mask |= (1u << 0);
   if (outputPinState[1]) mask |= (1u << 1);
@@ -1151,10 +1151,10 @@ static inline void updateOutputsSnapshot() {
   for (uint8_t i = 1; i <= 8; i++) {
     if (relayState[i]) mask |= (uint16_t)(1u << (i + 3)); // relay1 -> bit4
   }
-  mb_write(HR_OUTPUTS_MASK, mask);
+  return mask;
 }
 
-static inline void updateAlarmsSnapshot() {
+static inline uint16_t updateAlarmsSnapshot() {
   // Export raw digitalRead states (no polarity inversion assumptions).
   uint16_t mask = 0;
   if (digitalRead(PIN_A_CON_ALA) == HIGH) mask |= (1u << 0);
@@ -1164,7 +1164,19 @@ static inline void updateAlarmsSnapshot() {
   if (digitalRead(PIN_F_O_ALA) == HIGH) mask |= (1u << 4);
   if (digitalRead(PIN_A_P_ALA) == HIGH) mask |= (1u << 5);
   if (digitalRead(PIN_TRA_ALA) == HIGH) mask |= (1u << 6);
-  mb_write(HR_ALARMS_MASK, mask);
+  return mask;
+}
+
+static inline void publishSnapshotRegistersSafe(uint32_t nowMs) {
+  // Snapshot register publishing is rate-limited and performed before poll().
+  // This avoids writing holding registers in the post-poll response window.
+  static uint32_t lastSnapshotMs = 0;
+  static const uint32_t SNAPSHOT_PERIOD_MS = 100; // 10 Hz
+  if (lastSnapshotMs != 0 && (uint32_t)(nowMs - lastSnapshotMs) < SNAPSHOT_PERIOD_MS) return;
+  lastSnapshotMs = nowMs;
+
+  mb_write(HR_OUTPUTS_MASK, updateOutputsSnapshot());
+  mb_write(HR_ALARMS_MASK, updateAlarmsSnapshot());
 }
 
 static inline void setOutputPin(int pin, bool on) {
@@ -2012,6 +2024,10 @@ void loop() {
   // Auto-rescan expansions if they were not detected at boot (e.g., powered late)
   tryRescanExpansions();
 
+  // Keep snapshot holding registers stable by publishing before Modbus poll().
+  // This avoids writes in the post-poll response handling window.
+  publishSnapshotRegistersSafe(diagNowMs);
+
 #if USE_ARDUINO_MODBUS
   // ArduinoModbus Modbus TCP handling (single persistent client)
   // Pattern:
@@ -2287,9 +2303,6 @@ void loop() {
 
   // Live HMI values (HR10/HR11) update at 2 Hz.
   updateSensors2Hz(diagNowMs);
-
-  // Publish raw alarm input snapshot (HR181) from direct digital reads.
-  updateAlarmsSnapshot();
 
   // A0602 diagnostics are mirrored into HR60..HR67 at 1 Hz.
   updateA0602Diagnostics1Hz(diagNowMs);
