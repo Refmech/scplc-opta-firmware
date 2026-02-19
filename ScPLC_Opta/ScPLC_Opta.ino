@@ -127,7 +127,7 @@ static inline bool mb_detect_ro_violations() {
   if (mb_ro_violation_in_range(19, 20)) return true;
   if (mb_ro_violation_in_range(60, 67)) return true;
   if (mb_ro_violation_in_range(70, 71)) return true;
-  if (mb_ro_violation_in_range(180, 180)) return true;
+  if (mb_ro_violation_in_range(180, 181)) return true;
   if (mb_ro_violation_in_range(51, 51)) return true;
   return false;
 }
@@ -150,7 +150,7 @@ static inline void mb_restore_ro_holding_registers() {
   mb_restore_ro_range(19, 20);
   mb_restore_ro_range(60, 67);
   mb_restore_ro_range(70, 71);
-  mb_restore_ro_range(180, 180);
+  mb_restore_ro_range(180, 181);
   mb_restore_ro_range(51, 51);
 }
 #endif
@@ -312,6 +312,14 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //  - HR180     (u16):   outputs_mask (bit0 D0, bit1 D1, bit2 D2, bit3 D3,
 //                       bit4 R1, bit5 R2, bit6 R3, bit7 R4, bit8 R5, bit9 R6,
 //                       bit10 R7, bit11 R8)
+//  - HR181     (u16):   alarms_mask raw digital input snapshot
+//                       bit0 A0 analyzer_connected
+//                       bit1 A1 flow_alarm
+//                       bit2 A2 pressure_scrubber_right
+//                       bit3 A3 pressure_scrubber_left
+//                       bit4 A4 thermal_contacts_fans_1_2
+//                       bit5 A5 compressed_air_alarm
+//                       bit6 A6 transformer_alarm
 //
 // RW (read/write; client may write, Opta clamps/applies when commanded):
 //  - HR30..35  (scaled): O2 calibration/config
@@ -347,6 +355,7 @@ const uint16_t HR_CO2_MEAS  = 11; // 40012 (% * 100)
 const uint16_t HR_ROOM_MODE = 19; // 40020
 const uint16_t HR_STEP      = 20; // 40021
 const uint16_t HR_OUTPUTS_MASK = 180; // outputs bitmask snapshot
+const uint16_t HR_ALARMS_MASK = 181; // raw digital input alarm bitmask snapshot
 
 // Calibration (setpoints) registers (Pi writes, Opta clamps/applies)
 // Values are scaled integers:
@@ -1143,6 +1152,19 @@ static inline void updateOutputsSnapshot() {
     if (relayState[i]) mask |= (uint16_t)(1u << (i + 3)); // relay1 -> bit4
   }
   mb_write(HR_OUTPUTS_MASK, mask);
+}
+
+static inline void updateAlarmsSnapshot() {
+  // Export raw digitalRead states (no polarity inversion assumptions).
+  uint16_t mask = 0;
+  if (digitalRead(PIN_A_CON_ALA) == HIGH) mask |= (1u << 0);
+  if (digitalRead(PIN_FLO_ALA) == HIGH) mask |= (1u << 1);
+  if (digitalRead(PIN_R_C_P_ALA) == HIGH) mask |= (1u << 2);
+  if (digitalRead(PIN_L_C_P_ALA) == HIGH) mask |= (1u << 3);
+  if (digitalRead(PIN_F_O_ALA) == HIGH) mask |= (1u << 4);
+  if (digitalRead(PIN_A_P_ALA) == HIGH) mask |= (1u << 5);
+  if (digitalRead(PIN_TRA_ALA) == HIGH) mask |= (1u << 6);
+  mb_write(HR_ALARMS_MASK, mask);
 }
 
 static inline void setOutputPin(int pin, bool on) {
@@ -2265,6 +2287,9 @@ void loop() {
 
   // Live HMI values (HR10/HR11) update at 2 Hz.
   updateSensors2Hz(diagNowMs);
+
+  // Publish raw alarm input snapshot (HR181) from direct digital reads.
+  updateAlarmsSnapshot();
 
   // A0602 diagnostics are mirrored into HR60..HR67 at 1 Hz.
   updateA0602Diagnostics1Hz(diagNowMs);
