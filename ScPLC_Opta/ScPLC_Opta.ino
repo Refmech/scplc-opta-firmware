@@ -128,7 +128,7 @@ static inline bool mb_detect_ro_violations() {
   if (mb_ro_violation_in_range(60, 67)) return true;
   if (mb_ro_violation_in_range(70, 71)) return true;
   if (mb_ro_violation_in_range(180, 181)) return true;
-  if (mb_ro_violation_in_range(189, 198)) return true;
+  if (mb_ro_violation_in_range(189, 199)) return true;
   if (mb_ro_violation_in_range(51, 51)) return true;
   return false;
 }
@@ -152,7 +152,7 @@ static inline void mb_restore_ro_holding_registers() {
   mb_restore_ro_range(60, 67);
   mb_restore_ro_range(70, 71);
   mb_restore_ro_range(180, 181);
-  mb_restore_ro_range(189, 198);
+  mb_restore_ro_range(189, 199);
   mb_restore_ro_range(51, 51);
 }
 #endif
@@ -230,6 +230,7 @@ enum class Step : uint8_t {
   None,
   Meas,
   Calibrate,
+  CalibrateAbort,
   AerationPart1,
   AerationPart2,
   Cfg1_AdsReg1,
@@ -252,6 +253,7 @@ enum class Step : uint8_t {
 const unsigned long MEASUREMENT_TIME_MS = 120000UL; // 120 s
 // Calibration
 const unsigned long CALIBRATION_TIME_MS = 600000UL; // 10 minutes
+const unsigned long SAFE_ABORT_MS = 1500UL;
 
 // Aeration
 const unsigned long AER_PART1_TIME_MS = 10000UL;    // 10 s
@@ -287,6 +289,7 @@ static uint32_t calTimingCycleId = 0;
 static uint32_t calTimingDurationS = (CALIBRATION_TIME_MS / 1000UL);
 static uint32_t calTimingRemainingS = 0;
 static uint32_t calTimingLastUpdateMs = 0;
+static uint16_t calTimingResultCode = 0;
 
 // USER button no longer used; HMI triggers measurement via Modbus coil
 // bool lastUserButtonState = HIGH;
@@ -329,7 +332,7 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //                       bit4 A4 thermal_contacts_fans_1_2
 //                       bit5 A5 compressed_air_alarm
 //                       bit6 A6 transformer_alarm
-//  - HR190..199 (Timing Block v1: Calibration; code addresses HR189..HR198)
+//  - HR190..200 (Timing Block v1: Calibration; code addresses HR189..HR199)
 //      HR190     (u16): version (=1)
 //      HR191     (u16): seq
 //      HR192     (u16): seq2
@@ -337,6 +340,7 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //      HR194..195(u32): cycle_id (lo/hi)
 //      HR196..197(u32): duration_s (lo/hi)
 //      HR198..199(u32): remaining_s (lo/hi)
+//      HR200     (u16): result_code (0=none, 1=success, 2=aborted)
 //
 // RW (read/write; client may write, Opta clamps/applies when commanded):
 //  - HR30..35  (scaled): O2 calibration/config
@@ -359,6 +363,7 @@ const uint16_t COIL_CMD_CALIBRATE_START = 1; // 00002
 const uint16_t COIL_CMD_SCRUB_CFG1_START = 2; // 00003 (new)
 const uint16_t COIL_CMD_SCRUB_CFG2_START = 3; // 00004 (new) 
 const uint16_t COIL_CMD_RELAY_TEST       = 4; // 00005 (start/stop relay sweep)
+const uint16_t COIL_CMD_CALIBRATE_ABORT  = 5; // 00006 (edge-triggered abort during Step::Calibrate)
 
 
 // Holding registers
@@ -383,6 +388,7 @@ const uint16_t HR_CAL_TB_DURATION_S_LO  = 195; // calibration timing block durat
 const uint16_t HR_CAL_TB_DURATION_S_HI  = 196; // calibration timing block duration_s high (external HR197)
 const uint16_t HR_CAL_TB_REMAINING_S_LO = 197; // calibration timing block remaining_s low (external HR198)
 const uint16_t HR_CAL_TB_REMAINING_S_HI = 198; // calibration timing block remaining_s high (external HR199)
+const uint16_t HR_CAL_TB_RESULT_CODE    = 199; // calibration timing block result_code (external HR200)
 
 static const uint16_t CAL_TB_FLAG_SUPPORTED        = (1u << 0);
 static const uint16_t CAL_TB_FLAG_VALID            = (1u << 1);
@@ -642,6 +648,7 @@ static inline void publishCalibrationTimingBlock(bool valid, bool durationLatche
   mb_write_u32(HR_CAL_TB_CYCLE_ID_LO, calTimingCycleId);
   mb_write_u32(HR_CAL_TB_DURATION_S_LO, calTimingDurationS);
   mb_write_u32(HR_CAL_TB_REMAINING_S_LO, calTimingRemainingS);
+  mb_write(HR_CAL_TB_RESULT_CODE, calTimingResultCode);
 
   uint16_t seqEven = (uint16_t)(seqOdd + 1u);
   calTimingSeq = seqEven;
@@ -652,6 +659,12 @@ static inline void publishCalibrationTimingBlock(bool valid, bool durationLatche
 static inline void setCalibrationTimingIdle() {
   calTimingRemainingS = 0;
   calTimingDurationS = (uint32_t)(CALIBRATION_TIME_MS / 1000UL);
+  publishCalibrationTimingBlock(false, false);
+}
+
+static inline void setCalibrationTimingAbortStep() {
+  calTimingRemainingS = 0;
+  calTimingDurationS = 0;
   publishCalibrationTimingBlock(false, false);
 }
 
@@ -1656,6 +1669,7 @@ void startCalibrationCycle() {
   startStep(Step::Calibrate, CALIBRATION_TIME_MS);
 
   calTimingCycleId++;
+  calTimingResultCode = 0;
   calTimingDurationS = (uint32_t)(CALIBRATION_TIME_MS / 1000UL);
   calTimingRemainingS = calTimingDurationS;
   calTimingLastUpdateMs = millis();
@@ -1666,32 +1680,69 @@ void startCalibrationCycle() {
   mb_write(HR_STEP,      (uint16_t)currentStep);
 }
 
+void abortCalibrationCycle() {
+  // Honored only for active calibration step.
+  if (!(currentMode == RoomMode::Calibrating && currentStep == Step::Calibrate)) {
+    return;
+  }
+
+  // Immediately de-energize calibration outputs and move to abort dwell step.
+  setAllOutputsOff();
+  startStep(Step::CalibrateAbort, SAFE_ABORT_MS);
+  mb_write(HR_STEP, (uint16_t)currentStep);
+
+  calTimingLastUpdateMs = millis();
+  calTimingResultCode = 2; // aborted
+  setCalibrationTimingAbortStep();
+}
+
 void handleCalibration() {
   unsigned long now = millis();
 
-  // Keep remaining_s updates at <= 1 Hz while calibration is active.
-  if ((uint32_t)(now - calTimingLastUpdateMs) >= 1000u) {
-    calTimingLastUpdateMs = now;
-    uint32_t elapsedMs = (uint32_t)(now - stepStartMs);
-    uint32_t remainingMs = (elapsedMs >= (uint32_t)CALIBRATION_TIME_MS)
-      ? 0u
-      : ((uint32_t)CALIBRATION_TIME_MS - elapsedMs);
-    uint32_t nextRemainingS = (remainingMs + 999u) / 1000u;
-    if (nextRemainingS > calTimingRemainingS) nextRemainingS = calTimingRemainingS;
-    calTimingRemainingS = nextRemainingS;
-    publishCalibrationTimingBlock(true, true);
-  }
+  switch (currentStep) {
+    case Step::Calibrate:
+      // Keep remaining_s updates at <= 1 Hz while calibration is active.
+      if ((uint32_t)(now - calTimingLastUpdateMs) >= 1000u) {
+        calTimingLastUpdateMs = now;
+        uint32_t elapsedMs = (uint32_t)(now - stepStartMs);
+        uint32_t remainingMs = (elapsedMs >= (uint32_t)CALIBRATION_TIME_MS)
+          ? 0u
+          : ((uint32_t)CALIBRATION_TIME_MS - elapsedMs);
+        uint32_t nextRemainingS = (remainingMs + 999u) / 1000u;
+        if (nextRemainingS > calTimingRemainingS) nextRemainingS = calTimingRemainingS;
+        calTimingRemainingS = nextRemainingS;
+        publishCalibrationTimingBlock(true, true);
+      }
 
-  if (!stepTimeElapsed()) {
-    return;
+      if (!stepTimeElapsed()) {
+        return;
+      }
+
+      // End calibration normally when time elapses; resume Idle.
+      setAllOutputsOff();
+      currentMode = RoomMode::Idle;
+      currentStep = Step::None;
+      mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
+      mb_write(HR_STEP,      (uint16_t)currentStep);
+      calTimingResultCode = 1; // success
+      setCalibrationTimingIdle();
+      return;
+
+    case Step::CalibrateAbort:
+      if (!stepTimeElapsed()) {
+        return;
+      }
+
+      currentMode = RoomMode::Idle;
+      currentStep = Step::None;
+      mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
+      mb_write(HR_STEP,      (uint16_t)currentStep);
+      setCalibrationTimingIdle();
+      return;
+
+    default:
+      return;
   }
-  // End calibration when time elapses; resume Idle
-  setAllOutputsOff();
-  currentMode = RoomMode::Idle;
-  currentStep = Step::None;
-  mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
-  mb_write(HR_STEP,      (uint16_t)currentStep);
-  setCalibrationTimingIdle();
 }
 
 // Periodic serial output of latest O2/CO2 measurements (global scope)
@@ -2024,9 +2075,9 @@ void setup() {
   }
 
   // Minimal, safe register map:
-  // - Coils 0..4: momentary commands from HMI/Pi
+  // - Coils 0..5: momentary commands from HMI/Pi
   // - Holding regs 0..199: allows reads of HR10..HR20 and HR120.. with no crashes
-  modbusTCPServer.configureCoils(0, 5);
+  modbusTCPServer.configureCoils(0, 6);
   modbusTCPServer.configureHoldingRegisters(0, HOLDING_REGS_SIZE);
 
   if (Serial) {
@@ -2036,7 +2087,7 @@ void setup() {
   }
 
   // Initialize coils low
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 6; i++) {
     (void)modbusTCPServer.coilWrite(i, 0);
   }
 
@@ -2325,6 +2376,7 @@ void loop() {
     int coil2 = modbusTCPServer.coilRead(COIL_CMD_SCRUB_CFG1_START);
     int coil3 = modbusTCPServer.coilRead(COIL_CMD_SCRUB_CFG2_START);
     int coil4 = modbusTCPServer.coilRead(COIL_CMD_RELAY_TEST);
+    int coil5 = modbusTCPServer.coilRead(COIL_CMD_CALIBRATE_ABORT);
 
     if (coil0) {
       (void)modbusTCPServer.coilWrite(COIL_CMD_MEASURE_START, 0);
@@ -2345,6 +2397,13 @@ void loop() {
       (void)modbusTCPServer.coilWrite(COIL_CMD_SCRUB_CFG2_START, 0);
       if (LOG_ACTIONS) Serial.println("[MB] coil3=1 -> startScrubCfg2");
       if (currentMode == RoomMode::Idle) startScrubCfg2();
+    }
+    if (coil5) {
+      (void)modbusTCPServer.coilWrite(COIL_CMD_CALIBRATE_ABORT, 0);
+      if (LOG_ACTIONS) Serial.println("[MB] coil5=1 -> abortCalibrationCycle");
+      if (currentMode == RoomMode::Calibrating && currentStep == Step::Calibrate) {
+        abortCalibrationCycle();
+      }
     }
     // coil4 is a level: 1=run sweep, 0=stop sweep
     static int lastCoil4 = 0;
