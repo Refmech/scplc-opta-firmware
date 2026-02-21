@@ -127,7 +127,8 @@ static inline bool mb_detect_ro_violations() {
   if (mb_ro_violation_in_range(19, 20)) return true;
   if (mb_ro_violation_in_range(60, 67)) return true;
   if (mb_ro_violation_in_range(70, 71)) return true;
-  if (mb_ro_violation_in_range(180, 180)) return true;
+  if (mb_ro_violation_in_range(180, 181)) return true;
+  if (mb_ro_violation_in_range(189, 198)) return true;
   if (mb_ro_violation_in_range(51, 51)) return true;
   return false;
 }
@@ -150,7 +151,8 @@ static inline void mb_restore_ro_holding_registers() {
   mb_restore_ro_range(19, 20);
   mb_restore_ro_range(60, 67);
   mb_restore_ro_range(70, 71);
-  mb_restore_ro_range(180, 180);
+  mb_restore_ro_range(180, 181);
+  mb_restore_ro_range(189, 198);
   mb_restore_ro_range(51, 51);
 }
 #endif
@@ -279,6 +281,13 @@ unsigned long stepStartMs      = 0;
 unsigned long stepDurationMs   = 0;
 unsigned long pendingAerationPart2Time = 0;
 
+// Calibration Timing Block v1 runtime state (code addresses HR189..HR198 = external HR190..HR199)
+static uint16_t calTimingSeq = 0;
+static uint32_t calTimingCycleId = 0;
+static uint32_t calTimingDurationS = (CALIBRATION_TIME_MS / 1000UL);
+static uint32_t calTimingRemainingS = 0;
+static uint32_t calTimingLastUpdateMs = 0;
+
 // USER button no longer used; HMI triggers measurement via Modbus coil
 // bool lastUserButtonState = HIGH;
 
@@ -312,6 +321,22 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //  - HR180     (u16):   outputs_mask (bit0 D0, bit1 D1, bit2 D2, bit3 D3,
 //                       bit4 R1, bit5 R2, bit6 R3, bit7 R4, bit8 R5, bit9 R6,
 //                       bit10 R7, bit11 R8)
+//  - HR181     (u16):   alarms_mask raw digital input snapshot
+//                       bit0 A0 analyzer_connected
+//                       bit1 A1 flow_alarm
+//                       bit2 A2 pressure_scrubber_right
+//                       bit3 A3 pressure_scrubber_left
+//                       bit4 A4 thermal_contacts_fans_1_2
+//                       bit5 A5 compressed_air_alarm
+//                       bit6 A6 transformer_alarm
+//  - HR190..199 (Timing Block v1: Calibration; code addresses HR189..HR198)
+//      HR190     (u16): version (=1)
+//      HR191     (u16): seq
+//      HR192     (u16): seq2
+//      HR193     (u16): flags (bit0 SUPPORTED, bit1 VALID, bit2 DURATION_LATCHED)
+//      HR194..195(u32): cycle_id (lo/hi)
+//      HR196..197(u32): duration_s (lo/hi)
+//      HR198..199(u32): remaining_s (lo/hi)
 //
 // RW (read/write; client may write, Opta clamps/applies when commanded):
 //  - HR30..35  (scaled): O2 calibration/config
@@ -347,6 +372,21 @@ const uint16_t HR_CO2_MEAS  = 11; // 40012 (% * 100)
 const uint16_t HR_ROOM_MODE = 19; // 40020
 const uint16_t HR_STEP      = 20; // 40021
 const uint16_t HR_OUTPUTS_MASK = 180; // outputs bitmask snapshot
+const uint16_t HR_ALARMS_MASK = 181; // raw digital input alarm bitmask snapshot
+const uint16_t HR_CAL_TB_VERSION        = 189; // calibration timing block version (external HR190)
+const uint16_t HR_CAL_TB_SEQ            = 190; // calibration timing block seq (external HR191)
+const uint16_t HR_CAL_TB_SEQ2           = 191; // calibration timing block seq2 (external HR192)
+const uint16_t HR_CAL_TB_FLAGS          = 192; // calibration timing block flags (external HR193)
+const uint16_t HR_CAL_TB_CYCLE_ID_LO    = 193; // calibration timing block cycle_id low (external HR194)
+const uint16_t HR_CAL_TB_CYCLE_ID_HI    = 194; // calibration timing block cycle_id high (external HR195)
+const uint16_t HR_CAL_TB_DURATION_S_LO  = 195; // calibration timing block duration_s low (external HR196)
+const uint16_t HR_CAL_TB_DURATION_S_HI  = 196; // calibration timing block duration_s high (external HR197)
+const uint16_t HR_CAL_TB_REMAINING_S_LO = 197; // calibration timing block remaining_s low (external HR198)
+const uint16_t HR_CAL_TB_REMAINING_S_HI = 198; // calibration timing block remaining_s high (external HR199)
+
+static const uint16_t CAL_TB_FLAG_SUPPORTED        = (1u << 0);
+static const uint16_t CAL_TB_FLAG_VALID            = (1u << 1);
+static const uint16_t CAL_TB_FLAG_DURATION_LATCHED = (1u << 2);
 
 // Calibration (setpoints) registers (Pi writes, Opta clamps/applies)
 // Values are scaled integers:
@@ -580,6 +620,39 @@ static inline uint16_t clamp_u16(int32_t v, uint16_t lo, uint16_t hi) {
   if (v < (int32_t)lo) return lo;
   if (v > (int32_t)hi) return hi;
   return (uint16_t)v;
+}
+
+static inline void mb_write_u32(uint16_t loAddr, uint32_t value) {
+  mb_write(loAddr, (uint16_t)(value & 0xFFFFu));
+  mb_write((uint16_t)(loAddr + 1u), (uint16_t)((value >> 16) & 0xFFFFu));
+}
+
+static inline void publishCalibrationTimingBlock(bool valid, bool durationLatched) {
+  uint16_t flags = CAL_TB_FLAG_SUPPORTED;
+  if (valid) flags |= CAL_TB_FLAG_VALID;
+  if (durationLatched) flags |= CAL_TB_FLAG_DURATION_LATCHED;
+
+  uint16_t seqOdd = (uint16_t)((calTimingSeq + 1u) | 1u);
+  calTimingSeq = seqOdd;
+  mb_write(HR_CAL_TB_SEQ, seqOdd);
+  mb_write(HR_CAL_TB_SEQ2, seqOdd);
+
+  mb_write(HR_CAL_TB_VERSION, 1u);
+  mb_write(HR_CAL_TB_FLAGS, flags);
+  mb_write_u32(HR_CAL_TB_CYCLE_ID_LO, calTimingCycleId);
+  mb_write_u32(HR_CAL_TB_DURATION_S_LO, calTimingDurationS);
+  mb_write_u32(HR_CAL_TB_REMAINING_S_LO, calTimingRemainingS);
+
+  uint16_t seqEven = (uint16_t)(seqOdd + 1u);
+  calTimingSeq = seqEven;
+  mb_write(HR_CAL_TB_SEQ, seqEven);
+  mb_write(HR_CAL_TB_SEQ2, seqEven);
+}
+
+static inline void setCalibrationTimingIdle() {
+  calTimingRemainingS = 0;
+  calTimingDurationS = (uint32_t)(CALIBRATION_TIME_MS / 1000UL);
+  publishCalibrationTimingBlock(false, false);
 }
 
 static float clampf(float v, float lo, float hi) { return (v < lo) ? lo : (v > hi ? hi : v); }
@@ -1133,7 +1206,7 @@ static void updateSensors2Hz(uint32_t nowMs) {
 static bool outputPinState[4] = { false, false, false, false }; // D0..D3
 static bool relayState[9] = { false, false, false, false, false, false, false, false, false }; // 1..8
 
-static inline void updateOutputsSnapshot() {
+static inline uint16_t updateOutputsSnapshot() {
   uint16_t mask = 0;
   if (outputPinState[0]) mask |= (1u << 0);
   if (outputPinState[1]) mask |= (1u << 1);
@@ -1142,7 +1215,32 @@ static inline void updateOutputsSnapshot() {
   for (uint8_t i = 1; i <= 8; i++) {
     if (relayState[i]) mask |= (uint16_t)(1u << (i + 3)); // relay1 -> bit4
   }
-  mb_write(HR_OUTPUTS_MASK, mask);
+  return mask;
+}
+
+static inline uint16_t updateAlarmsSnapshot() {
+  // Export raw digitalRead states (no polarity inversion assumptions).
+  uint16_t mask = 0;
+  if (digitalRead(PIN_A_CON_ALA) == HIGH) mask |= (1u << 0);
+  if (digitalRead(PIN_FLO_ALA) == HIGH) mask |= (1u << 1);
+  if (digitalRead(PIN_R_C_P_ALA) == HIGH) mask |= (1u << 2);
+  if (digitalRead(PIN_L_C_P_ALA) == HIGH) mask |= (1u << 3);
+  if (digitalRead(PIN_F_O_ALA) == HIGH) mask |= (1u << 4);
+  if (digitalRead(PIN_A_P_ALA) == HIGH) mask |= (1u << 5);
+  if (digitalRead(PIN_TRA_ALA) == HIGH) mask |= (1u << 6);
+  return mask;
+}
+
+static inline void publishSnapshotRegistersSafe(uint32_t nowMs) {
+  // Snapshot register publishing is rate-limited and performed before poll().
+  // This avoids writing holding registers in the post-poll response window.
+  static uint32_t lastSnapshotMs = 0;
+  static const uint32_t SNAPSHOT_PERIOD_MS = 100; // 10 Hz
+  if (lastSnapshotMs != 0 && (uint32_t)(nowMs - lastSnapshotMs) < SNAPSHOT_PERIOD_MS) return;
+  lastSnapshotMs = nowMs;
+
+  mb_write(HR_OUTPUTS_MASK, updateOutputsSnapshot());
+  mb_write(HR_ALARMS_MASK, updateAlarmsSnapshot());
 }
 
 static inline void setOutputPin(int pin, bool on) {
@@ -1556,12 +1654,34 @@ void startCalibrationCycle() {
   setAllOutputsOff();
   applyCalibrationOutputs();
   startStep(Step::Calibrate, CALIBRATION_TIME_MS);
+
+  calTimingCycleId++;
+  calTimingDurationS = (uint32_t)(CALIBRATION_TIME_MS / 1000UL);
+  calTimingRemainingS = calTimingDurationS;
+  calTimingLastUpdateMs = millis();
+  publishCalibrationTimingBlock(true, true);
+
   currentMode = RoomMode::Calibrating;
   mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
   mb_write(HR_STEP,      (uint16_t)currentStep);
 }
 
 void handleCalibration() {
+  unsigned long now = millis();
+
+  // Keep remaining_s updates at <= 1 Hz while calibration is active.
+  if ((uint32_t)(now - calTimingLastUpdateMs) >= 1000u) {
+    calTimingLastUpdateMs = now;
+    uint32_t elapsedMs = (uint32_t)(now - stepStartMs);
+    uint32_t remainingMs = (elapsedMs >= (uint32_t)CALIBRATION_TIME_MS)
+      ? 0u
+      : ((uint32_t)CALIBRATION_TIME_MS - elapsedMs);
+    uint32_t nextRemainingS = (remainingMs + 999u) / 1000u;
+    if (nextRemainingS > calTimingRemainingS) nextRemainingS = calTimingRemainingS;
+    calTimingRemainingS = nextRemainingS;
+    publishCalibrationTimingBlock(true, true);
+  }
+
   if (!stepTimeElapsed()) {
     return;
   }
@@ -1571,6 +1691,7 @@ void handleCalibration() {
   currentStep = Step::None;
   mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
   mb_write(HR_STEP,      (uint16_t)currentStep);
+  setCalibrationTimingIdle();
 }
 
 // Periodic serial output of latest O2/CO2 measurements (global scope)
@@ -1939,6 +2060,7 @@ void setup() {
   mb_write(HR_CAL_CMD, 0);
   mb_write(HR_CAL_STATUS, 0);
   mb_write(HR_SWEEP_RELAY_ON_MS, SWEEP_RELAY_ON_MS_DEFAULT);
+  setCalibrationTimingIdle();
   {
     uint16_t loadErr = 0;
     bool loaded = cal_store_load(&loadErr);
@@ -1989,6 +2111,10 @@ void loop() {
 
   // Auto-rescan expansions if they were not detected at boot (e.g., powered late)
   tryRescanExpansions();
+
+  // Keep snapshot holding registers stable by publishing before Modbus poll().
+  // This avoids writes in the post-poll response handling window.
+  publishSnapshotRegistersSafe(diagNowMs);
 
 #if USE_ARDUINO_MODBUS
   // ArduinoModbus Modbus TCP handling (single persistent client)
