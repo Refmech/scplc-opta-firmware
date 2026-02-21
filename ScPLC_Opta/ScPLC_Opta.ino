@@ -128,7 +128,7 @@ static inline bool mb_detect_ro_violations() {
   if (mb_ro_violation_in_range(60, 67)) return true;
   if (mb_ro_violation_in_range(70, 71)) return true;
   if (mb_ro_violation_in_range(180, 181)) return true;
-  if (mb_ro_violation_in_range(190, 199)) return true;
+  if (mb_ro_violation_in_range(189, 198)) return true;
   if (mb_ro_violation_in_range(51, 51)) return true;
   return false;
 }
@@ -152,7 +152,7 @@ static inline void mb_restore_ro_holding_registers() {
   mb_restore_ro_range(60, 67);
   mb_restore_ro_range(70, 71);
   mb_restore_ro_range(180, 181);
-  mb_restore_ro_range(190, 199);
+  mb_restore_ro_range(189, 198);
   mb_restore_ro_range(51, 51);
 }
 #endif
@@ -281,7 +281,7 @@ unsigned long stepStartMs      = 0;
 unsigned long stepDurationMs   = 0;
 unsigned long pendingAerationPart2Time = 0;
 
-// Calibration Timing Block v1 runtime state (HR190..HR199)
+// Calibration Timing Block v1 runtime state (code addresses HR189..HR198 = external HR190..HR199)
 static uint16_t calTimingSeq = 0;
 static uint32_t calTimingCycleId = 0;
 static uint32_t calTimingDurationS = (CALIBRATION_TIME_MS / 1000UL);
@@ -329,7 +329,7 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //                       bit4 A4 thermal_contacts_fans_1_2
 //                       bit5 A5 compressed_air_alarm
 //                       bit6 A6 transformer_alarm
-//  - HR190..199 (Timing Block v1: Calibration)
+//  - HR190..199 (Timing Block v1: Calibration; code addresses HR189..HR198)
 //      HR190     (u16): version (=1)
 //      HR191     (u16): seq
 //      HR192     (u16): seq2
@@ -373,16 +373,16 @@ const uint16_t HR_ROOM_MODE = 19; // 40020
 const uint16_t HR_STEP      = 20; // 40021
 const uint16_t HR_OUTPUTS_MASK = 180; // outputs bitmask snapshot
 const uint16_t HR_ALARMS_MASK = 181; // raw digital input alarm bitmask snapshot
-const uint16_t HR_CAL_TB_VERSION        = 190; // calibration timing block version
-const uint16_t HR_CAL_TB_SEQ            = 191; // calibration timing block seq
-const uint16_t HR_CAL_TB_SEQ2           = 192; // calibration timing block seq2
-const uint16_t HR_CAL_TB_FLAGS          = 193; // calibration timing block flags
-const uint16_t HR_CAL_TB_CYCLE_ID_LO    = 194; // calibration timing block cycle_id low
-const uint16_t HR_CAL_TB_CYCLE_ID_HI    = 195; // calibration timing block cycle_id high
-const uint16_t HR_CAL_TB_DURATION_S_LO  = 196; // calibration timing block duration_s low
-const uint16_t HR_CAL_TB_DURATION_S_HI  = 197; // calibration timing block duration_s high
-const uint16_t HR_CAL_TB_REMAINING_S_LO = 198; // calibration timing block remaining_s low
-const uint16_t HR_CAL_TB_REMAINING_S_HI = 199; // calibration timing block remaining_s high
+const uint16_t HR_CAL_TB_VERSION        = 189; // calibration timing block version (external HR190)
+const uint16_t HR_CAL_TB_SEQ            = 190; // calibration timing block seq (external HR191)
+const uint16_t HR_CAL_TB_SEQ2           = 191; // calibration timing block seq2 (external HR192)
+const uint16_t HR_CAL_TB_FLAGS          = 192; // calibration timing block flags (external HR193)
+const uint16_t HR_CAL_TB_CYCLE_ID_LO    = 193; // calibration timing block cycle_id low (external HR194)
+const uint16_t HR_CAL_TB_CYCLE_ID_HI    = 194; // calibration timing block cycle_id high (external HR195)
+const uint16_t HR_CAL_TB_DURATION_S_LO  = 195; // calibration timing block duration_s low (external HR196)
+const uint16_t HR_CAL_TB_DURATION_S_HI  = 196; // calibration timing block duration_s high (external HR197)
+const uint16_t HR_CAL_TB_REMAINING_S_LO = 197; // calibration timing block remaining_s low (external HR198)
+const uint16_t HR_CAL_TB_REMAINING_S_HI = 198; // calibration timing block remaining_s high (external HR199)
 
 static const uint16_t CAL_TB_FLAG_SUPPORTED        = (1u << 0);
 static const uint16_t CAL_TB_FLAG_VALID            = (1u << 1);
