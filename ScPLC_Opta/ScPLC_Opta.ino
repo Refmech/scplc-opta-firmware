@@ -128,6 +128,7 @@ static inline bool mb_detect_ro_violations() {
   if (mb_ro_violation_in_range(60, 67)) return true;
   if (mb_ro_violation_in_range(70, 71)) return true;
   if (mb_ro_violation_in_range(180, 181)) return true;
+  if (mb_ro_violation_in_range(190, 199)) return true;
   if (mb_ro_violation_in_range(51, 51)) return true;
   return false;
 }
@@ -151,6 +152,7 @@ static inline void mb_restore_ro_holding_registers() {
   mb_restore_ro_range(60, 67);
   mb_restore_ro_range(70, 71);
   mb_restore_ro_range(180, 181);
+  mb_restore_ro_range(190, 199);
   mb_restore_ro_range(51, 51);
 }
 #endif
@@ -279,6 +281,13 @@ unsigned long stepStartMs      = 0;
 unsigned long stepDurationMs   = 0;
 unsigned long pendingAerationPart2Time = 0;
 
+// Calibration Timing Block v1 runtime state (HR190..HR199)
+static uint16_t calTimingSeq = 0;
+static uint32_t calTimingCycleId = 0;
+static uint32_t calTimingDurationS = (CALIBRATION_TIME_MS / 1000UL);
+static uint32_t calTimingRemainingS = 0;
+static uint32_t calTimingLastUpdateMs = 0;
+
 // USER button no longer used; HMI triggers measurement via Modbus coil
 // bool lastUserButtonState = HIGH;
 
@@ -320,6 +329,14 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //                       bit4 A4 thermal_contacts_fans_1_2
 //                       bit5 A5 compressed_air_alarm
 //                       bit6 A6 transformer_alarm
+//  - HR190..199 (Timing Block v1: Calibration)
+//      HR190     (u16): version (=1)
+//      HR191     (u16): seq
+//      HR192     (u16): seq2
+//      HR193     (u16): flags (bit0 SUPPORTED, bit1 VALID, bit2 DURATION_LATCHED)
+//      HR194..195(u32): cycle_id (lo/hi)
+//      HR196..197(u32): duration_s (lo/hi)
+//      HR198..199(u32): remaining_s (lo/hi)
 //
 // RW (read/write; client may write, Opta clamps/applies when commanded):
 //  - HR30..35  (scaled): O2 calibration/config
@@ -356,6 +373,20 @@ const uint16_t HR_ROOM_MODE = 19; // 40020
 const uint16_t HR_STEP      = 20; // 40021
 const uint16_t HR_OUTPUTS_MASK = 180; // outputs bitmask snapshot
 const uint16_t HR_ALARMS_MASK = 181; // raw digital input alarm bitmask snapshot
+const uint16_t HR_CAL_TB_VERSION        = 190; // calibration timing block version
+const uint16_t HR_CAL_TB_SEQ            = 191; // calibration timing block seq
+const uint16_t HR_CAL_TB_SEQ2           = 192; // calibration timing block seq2
+const uint16_t HR_CAL_TB_FLAGS          = 193; // calibration timing block flags
+const uint16_t HR_CAL_TB_CYCLE_ID_LO    = 194; // calibration timing block cycle_id low
+const uint16_t HR_CAL_TB_CYCLE_ID_HI    = 195; // calibration timing block cycle_id high
+const uint16_t HR_CAL_TB_DURATION_S_LO  = 196; // calibration timing block duration_s low
+const uint16_t HR_CAL_TB_DURATION_S_HI  = 197; // calibration timing block duration_s high
+const uint16_t HR_CAL_TB_REMAINING_S_LO = 198; // calibration timing block remaining_s low
+const uint16_t HR_CAL_TB_REMAINING_S_HI = 199; // calibration timing block remaining_s high
+
+static const uint16_t CAL_TB_FLAG_SUPPORTED        = (1u << 0);
+static const uint16_t CAL_TB_FLAG_VALID            = (1u << 1);
+static const uint16_t CAL_TB_FLAG_DURATION_LATCHED = (1u << 2);
 
 // Calibration (setpoints) registers (Pi writes, Opta clamps/applies)
 // Values are scaled integers:
@@ -589,6 +620,39 @@ static inline uint16_t clamp_u16(int32_t v, uint16_t lo, uint16_t hi) {
   if (v < (int32_t)lo) return lo;
   if (v > (int32_t)hi) return hi;
   return (uint16_t)v;
+}
+
+static inline void mb_write_u32(uint16_t loAddr, uint32_t value) {
+  mb_write(loAddr, (uint16_t)(value & 0xFFFFu));
+  mb_write((uint16_t)(loAddr + 1u), (uint16_t)((value >> 16) & 0xFFFFu));
+}
+
+static inline void publishCalibrationTimingBlock(bool valid, bool durationLatched) {
+  uint16_t flags = CAL_TB_FLAG_SUPPORTED;
+  if (valid) flags |= CAL_TB_FLAG_VALID;
+  if (durationLatched) flags |= CAL_TB_FLAG_DURATION_LATCHED;
+
+  uint16_t seqOdd = (uint16_t)((calTimingSeq + 1u) | 1u);
+  calTimingSeq = seqOdd;
+  mb_write(HR_CAL_TB_SEQ, seqOdd);
+  mb_write(HR_CAL_TB_SEQ2, seqOdd);
+
+  mb_write(HR_CAL_TB_VERSION, 1u);
+  mb_write(HR_CAL_TB_FLAGS, flags);
+  mb_write_u32(HR_CAL_TB_CYCLE_ID_LO, calTimingCycleId);
+  mb_write_u32(HR_CAL_TB_DURATION_S_LO, calTimingDurationS);
+  mb_write_u32(HR_CAL_TB_REMAINING_S_LO, calTimingRemainingS);
+
+  uint16_t seqEven = (uint16_t)(seqOdd + 1u);
+  calTimingSeq = seqEven;
+  mb_write(HR_CAL_TB_SEQ, seqEven);
+  mb_write(HR_CAL_TB_SEQ2, seqEven);
+}
+
+static inline void setCalibrationTimingIdle() {
+  calTimingRemainingS = 0;
+  calTimingDurationS = (uint32_t)(CALIBRATION_TIME_MS / 1000UL);
+  publishCalibrationTimingBlock(false, false);
 }
 
 static float clampf(float v, float lo, float hi) { return (v < lo) ? lo : (v > hi ? hi : v); }
@@ -1590,12 +1654,34 @@ void startCalibrationCycle() {
   setAllOutputsOff();
   applyCalibrationOutputs();
   startStep(Step::Calibrate, CALIBRATION_TIME_MS);
+
+  calTimingCycleId++;
+  calTimingDurationS = (uint32_t)(CALIBRATION_TIME_MS / 1000UL);
+  calTimingRemainingS = calTimingDurationS;
+  calTimingLastUpdateMs = millis();
+  publishCalibrationTimingBlock(true, true);
+
   currentMode = RoomMode::Calibrating;
   mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
   mb_write(HR_STEP,      (uint16_t)currentStep);
 }
 
 void handleCalibration() {
+  unsigned long now = millis();
+
+  // Keep remaining_s updates at <= 1 Hz while calibration is active.
+  if ((uint32_t)(now - calTimingLastUpdateMs) >= 1000u) {
+    calTimingLastUpdateMs = now;
+    uint32_t elapsedMs = (uint32_t)(now - stepStartMs);
+    uint32_t remainingMs = (elapsedMs >= (uint32_t)CALIBRATION_TIME_MS)
+      ? 0u
+      : ((uint32_t)CALIBRATION_TIME_MS - elapsedMs);
+    uint32_t nextRemainingS = (remainingMs + 999u) / 1000u;
+    if (nextRemainingS > calTimingRemainingS) nextRemainingS = calTimingRemainingS;
+    calTimingRemainingS = nextRemainingS;
+    publishCalibrationTimingBlock(true, true);
+  }
+
   if (!stepTimeElapsed()) {
     return;
   }
@@ -1605,6 +1691,7 @@ void handleCalibration() {
   currentStep = Step::None;
   mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
   mb_write(HR_STEP,      (uint16_t)currentStep);
+  setCalibrationTimingIdle();
 }
 
 // Periodic serial output of latest O2/CO2 measurements (global scope)
@@ -1973,6 +2060,7 @@ void setup() {
   mb_write(HR_CAL_CMD, 0);
   mb_write(HR_CAL_STATUS, 0);
   mb_write(HR_SWEEP_RELAY_ON_MS, SWEEP_RELAY_ON_MS_DEFAULT);
+  setCalibrationTimingIdle();
   {
     uint16_t loadErr = 0;
     bool loaded = cal_store_load(&loadErr);
