@@ -75,7 +75,23 @@ Diagnostics you’ll see on Serial:
 - `1` (00002): Start calibration
 - `2` (00003): Start scrub config 1
 - `3` (00004): Start scrub config 2
-- `4` (00005): Relay sweep test start/stop
+- `4` (00005): Relay sweep test command (`COIL_CMD_RELAY_TEST`)
+  - **Level semantics**: `1 = run`, `0 = stop`
+  - Sweep start is accepted only when `currentMode == Idle` and no sweep is already active
+  - Sweep stop is applied when `coil4 == 0` and sweep is active
+  - mbpoll note: when using `mbpoll -0` (PDU 0-based addressing), the sweep coil is `-r 4`.
+
+### Selective sweep behavior (production)
+
+- `HR52` (`HR_SWEEP_RELAY_ON_MS`) controls relay ON dwell time in ms.
+  - Behavior is unchanged: value is clamped to `100..60000` and write-backed by firmware.
+- `HR53` (`HR_SWEEP_SELECT_MASK`) is a 12-bit sweep select mask.
+  - Bit mapping:
+    - bits `0..3`: `D0..D3`
+    - bits `4..11`: `R1..R8`
+  - Register clamp/write-back: `0x0000..0x0FFF`.
+  - Backward compatibility rule: if `HR53 == 0`, firmware keeps stored value `0` but treats it as **ALL selected** (`0x0FFF`) at sweep start.
+  - The effective mask is **latched at sweep start**; sweep then runs against the latched mask for that run.
 
 ### Key holding registers (0-based)
 
@@ -100,6 +116,7 @@ Read-only (firmware-owned):
   - bit9 Relay6 (REL_MEAS_V_CAL)
   - bit10 Relay7 (REL_MEAS_V_A_I)
   - bit11 Relay8 (REL_N2_REC_V)
+  - Note: this is a **commanded output snapshot**, not physical output feedback.
 
 Read/write (setpoints/config):
 - `30..35`: O2 calibration/config
@@ -113,6 +130,14 @@ Control arbitration (reserved block):
 - `105`: `HMI_HEARTBEAT` (HMI increments; used for timeout/lease)
 
 For the authoritative definitions, see the register map comment block in [ScPLC_Opta/ScPLC_Opta.ino](ScPLC_Opta/ScPLC_Opta.ino).
+
+## Development / Release Workflow
+
+- Local development happens in Dropbox working copies.
+- Firmware is compiled/flashed with Arduino CLI (and can be uploaded via DFU from CLI).
+- GitHub is used as the backup/review system of record.
+- Merge policy: **merge commits only** (no squash/rebase merges).
+- Branch policy: do **not** delete branches automatically after merge.
 
 ## I/O Mapping
 
