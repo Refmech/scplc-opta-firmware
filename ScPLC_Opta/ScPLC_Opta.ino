@@ -95,6 +95,7 @@ static inline bool isHoldingRegWritable(uint16_t addr) {
   if (addr >= 30 && addr <= 35) return true; // O2 calibration/config
   if (addr >= 40 && addr <= 45) return true; // CO2 calibration/config
   if (addr == 52) return true; // sweep relay ON dwell time (ms)
+  if (addr == 53) return true; // sweep select mask (12-bit)
 
   // Control ownership arbitration (reserved for Option B later)
   if (addr == 100 || addr == 101 || addr == 105) return true; // CONTROL_OWNER / CONTROL_CMD_ID / HMI_HEARTBEAT
@@ -346,6 +347,7 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //  - HR30..35  (scaled): O2 calibration/config
 //  - HR40..45  (scaled): CO2 calibration/config
 //  - HR52      (u16 ms): sweep relay ON dwell time (clamped 100..60000)
+//  - HR53      (u16):    sweep select mask (clamped 0x0000..0x0FFF; 0=>ALL at runtime)
 //  - HR100..101 (u16):   Control ownership arbitration
 //                      HR100 = CONTROL_OWNER (0=NONE, 1=HMI, 2=PI)
 //                      HR101 = CONTROL_CMD_ID (caller-provided u16 tag; Opta may overwrite)
@@ -417,6 +419,7 @@ const uint16_t HR_CO2_CAL_I_MAX_MA_X100  = 45; // CO2 current max (mA): typicall
 const uint16_t HR_CAL_CMD               = 50; // 1=apply (RAM), 2=save (NVM), 3=restore defaults
 const uint16_t HR_CAL_STATUS            = 51; // status/error codes (see register map)
 const uint16_t HR_SWEEP_RELAY_ON_MS     = 52; // sweep relay ON dwell time (ms)
+const uint16_t HR_SWEEP_SELECT_MASK     = 53; // sweep select mask (u16; bits 0..11)
 
 // Diagnostics registers (Opta writes, HMI can read)
 // Reserved block: HR60..HR71
@@ -1348,6 +1351,15 @@ static inline uint16_t clampSweepRelayOnDurationMs(uint32_t valueMs) {
   return (uint16_t)valueMs;
 }
 
+// Selective sweep mask (HR53): 12-bit mask covering the sweep outputs.
+// Bit mapping (matches sweep internal order):
+//   bits 0..3  => D0..D3 (PIN_FAN_1, PIN_FAN_2, PIN_RM_V_1, PIN_N2_RM_V_1)
+//   bits 4..11 => R1..R8
+static inline uint16_t clampSweepSelectMask(uint32_t valueMask) {
+  if (valueMask > 0x0FFFu) return 0x0FFFu;
+  return (uint16_t)valueMask;
+}
+
 static const uint8_t SWEEP_OUTPUT_COUNT = 12; // D0..D3, then Relay1..Relay8
 struct RelaySweepState {
   bool sweep_active;
@@ -1358,6 +1370,7 @@ struct RelaySweepState {
 
 static RelaySweepState relaySweep = { false, 0, 0, false };
 static uint16_t sweepRelayOnTimeMsLatched = SWEEP_RELAY_ON_MS_DEFAULT;
+static uint16_t sweepSelectMaskLatched = 0x0FFFu;
 
 static void relaySweepSetRelay(uint8_t relayIndex1Based, bool on);
 
@@ -1408,18 +1421,39 @@ static void relaySweepSetAllOff() {
   }
 }
 
+static inline bool relaySweepOutputSelected(uint8_t outputIndex1Based) {
+  if (outputIndex1Based < 1 || outputIndex1Based > SWEEP_OUTPUT_COUNT) return false;
+  uint8_t bit = (uint8_t)(outputIndex1Based - 1);
+  return (sweepSelectMaskLatched & (uint16_t)(1u << bit)) != 0u;
+}
+
+static inline uint8_t relaySweepFindNextSelected(uint8_t startIndex1Based) {
+  for (uint8_t i = startIndex1Based; i <= SWEEP_OUTPUT_COUNT; i++) {
+    if (relaySweepOutputSelected(i)) return i;
+  }
+  return 0;
+}
+
 static void relaySweepBegin() {
   // Sanity: ensure digital expansion present before attempting
   if (digitalExpIndex < 0) {
     Serial.println("[RelaySeq] Digital expansion not detected (index=-1). Check 24V/backplane.");
   }
   relaySweep.sweep_active = true;
-  relaySweep.current_output_index = 1;
   relaySweep.phase_on = true;
   sweepRelayOnTimeMsLatched = clampSweepRelayOnDurationMs((uint32_t)holdingRegs[HR_SWEEP_RELAY_ON_MS]);
+  uint16_t clampedMask = clampSweepSelectMask((uint32_t)holdingRegs[HR_SWEEP_SELECT_MASK]);
+  uint16_t effectiveMask = (clampedMask == 0u) ? 0x0FFFu : clampedMask;
+  sweepSelectMaskLatched = effectiveMask;
+  relaySweep.current_output_index = relaySweepFindNextSelected(1);
   relaySweep.last_transition_ms = millis();
   relaySweepSetAllOff();
-  relaySweepSetOutput(relaySweep.current_output_index, true);
+  if (relaySweep.current_output_index > 0) {
+    relaySweepSetOutput(relaySweep.current_output_index, true);
+  } else {
+    relaySweep.sweep_active = false;
+    relaySweep.phase_on = false;
+  }
   if (LOG_SWEEP_EVENTS) Serial.println("Relay sequencer: start");
 }
 
@@ -1443,13 +1477,16 @@ static inline void relaySweepTick(uint32_t nowMs) {
     return;
   }
 
-  if (relaySweep.current_output_index < SWEEP_OUTPUT_COUNT) {
-    relaySweep.current_output_index++;
-    relaySweepSetOutput(relaySweep.current_output_index, true);
-    relaySweep.phase_on = true;
-    relaySweep.last_transition_ms = nowMs;
-  } else {
-    relaySweepStop();
+  {
+    uint8_t nextIndex = relaySweepFindNextSelected((uint8_t)(relaySweep.current_output_index + 1));
+    if (nextIndex > 0) {
+      relaySweep.current_output_index = nextIndex;
+      relaySweepSetOutput(relaySweep.current_output_index, true);
+      relaySweep.phase_on = true;
+      relaySweep.last_transition_ms = nowMs;
+    } else {
+      relaySweepStop();
+    }
   }
 }
 
@@ -2369,6 +2406,18 @@ void loop() {
       }
     }
 
+    // Sweep select mask clamp (RW register HR53). Clamp only; 0 is kept as 0 (runtime treats 0 as ALL).
+    {
+      long rawMaskValue = modbusTCPServer.holdingRegisterRead((int)HR_SWEEP_SELECT_MASK);
+      if (rawMaskValue >= 0) {
+        uint16_t raw = (uint16_t)rawMaskValue;
+        uint16_t clamped = clampSweepSelectMask((uint32_t)raw);
+        if (raw != clamped || holdingRegs[HR_SWEEP_SELECT_MASK] != clamped) {
+          mb_write(HR_SWEEP_SELECT_MASK, clamped);
+        }
+      }
+    }
+
     // Momentary coil commands: detect set bits, act once, then reset coil.
     // (Coil/register table is shared across all clients.)
     int coil0 = modbusTCPServer.coilRead(COIL_CMD_MEASURE_START);
@@ -2410,11 +2459,17 @@ void loop() {
     if (coil4 != lastCoil4) {
       lastCoil4 = coil4;
       if (coil4) {
-        if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 -> relay sequencer BEGIN");
-        relaySweepBegin();
+        if (currentMode == RoomMode::Idle) {
+          if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 -> relay sequencer BEGIN");
+          relaySweepBegin();
+        } else {
+          if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 ignored (not Idle)");
+        }
       } else {
-        if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=0 -> relay sequencer STOP");
-        relaySweepStop();
+        if (relaySweep.sweep_active) {
+          if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=0 -> relay sequencer STOP");
+          relaySweepStop();
+        }
       }
     }
 
