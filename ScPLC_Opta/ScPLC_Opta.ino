@@ -54,8 +54,8 @@ EthernetServer    mbServer(502); // Modbus TCP server socket
 ModbusTCPServer   modbusTCPServer;
 
 // Holding register mirror (0-based addresses). Sized to cover the largest block we expose.
-// Keep this modest; 256 regs = 512 bytes.
-static const uint16_t HOLDING_REGS_SIZE = 256;
+// Keep this modest; 200 regs = 400 bytes.
+static const uint16_t HOLDING_REGS_SIZE = 200;
 static uint16_t holdingRegs[HOLDING_REGS_SIZE] = {0};
 
 // Modbus health instrumentation (ultra-light)
@@ -420,10 +420,6 @@ const uint16_t HR_CAL_CMD               = 50; // 1=apply (RAM), 2=save (NVM), 3=
 const uint16_t HR_CAL_STATUS            = 51; // status/error codes (see register map)
 const uint16_t HR_SWEEP_RELAY_ON_MS     = 52; // sweep relay ON dwell time (ms)
 const uint16_t HR_SWEEP_SELECT_MASK     = 53; // sweep select mask (u16; bits 0..11)
-const uint16_t HR_DEBUG_COIL4               = 250; // TEMP DEBUG - mirrors COIL_CMD_RELAY_TEST runtime value
-const uint16_t HR_DEBUG_SWEEP_ACTIVE        = 251; // TEMP DEBUG - mirrors relaySweep.sweep_active
-const uint16_t HR_DEBUG_SWEEP_POS           = 252; // TEMP DEBUG - mirrors relaySweep.current_output_index
-const uint16_t HR_DEBUG_SWEEP_MASK_LATCHED  = 253; // TEMP DEBUG - mirrors sweepSelectMaskLatched
 
 // Diagnostics registers (Opta writes, HMI can read)
 // Reserved block: HR60..HR71
@@ -2429,10 +2425,6 @@ void loop() {
     int coil2 = modbusTCPServer.coilRead(COIL_CMD_SCRUB_CFG1_START);
     int coil3 = modbusTCPServer.coilRead(COIL_CMD_SCRUB_CFG2_START);
     int coil4 = modbusTCPServer.coilRead(COIL_CMD_RELAY_TEST);
-    mb_write(HR_DEBUG_COIL4, (uint16_t)coil4);
-    mb_write(HR_DEBUG_SWEEP_ACTIVE, relaySweep.sweep_active ? 1u : 0u);
-    mb_write(HR_DEBUG_SWEEP_POS, (uint16_t)relaySweep.current_output_index);
-    mb_write(HR_DEBUG_SWEEP_MASK_LATCHED, sweepSelectMaskLatched);
     int coil5 = modbusTCPServer.coilRead(COIL_CMD_CALIBRATE_ABORT);
 
     if (coil0) {
