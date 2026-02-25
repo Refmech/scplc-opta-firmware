@@ -2462,23 +2462,22 @@ void loop() {
         abortCalibrationCycle();
       }
     }
-    // coil4 is a level: 1=run sweep, 0=stop sweep
+    // coil4 level command with state gating:
+    // - start only when commanded ON, Idle, and not already active
+    // - stop when commanded OFF and currently active
     static int lastCoil4 = 0;
-    if (coil4 != lastCoil4) {
+    bool coil4Edge = (coil4 != lastCoil4);
+    if (coil4Edge) {
       lastCoil4 = coil4;
-      if (coil4) {
-        if (currentMode == RoomMode::Idle) {
-          if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 -> relay sequencer BEGIN");
-          relaySweepBegin();
-        } else {
-          if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 ignored (not Idle)");
-        }
-      } else {
-        if (relaySweep.sweep_active) {
-          if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=0 -> relay sequencer STOP");
-          relaySweepStop();
-        }
-      }
+    }
+    if (coil4 && currentMode == RoomMode::Idle && !relaySweep.sweep_active) {
+      if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 -> relay sequencer BEGIN");
+      relaySweepBegin();
+    } else if (!coil4 && relaySweep.sweep_active) {
+      if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=0 -> relay sequencer STOP");
+      relaySweepStop();
+    } else if (coil4Edge && coil4 && currentMode != RoomMode::Idle && !relaySweep.sweep_active) {
+      if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 ignored (not Idle)");
     }
 
     // Periodic Modbus health summary (low impact)
