@@ -54,8 +54,8 @@ EthernetServer    mbServer(502); // Modbus TCP server socket
 ModbusTCPServer   modbusTCPServer;
 
 // Holding register mirror (0-based addresses). Sized to cover the largest block we expose.
-// Keep this modest; 200 regs = 400 bytes.
-static const uint16_t HOLDING_REGS_SIZE = 200;
+// Keep this modest; 256 regs = 512 bytes.
+static const uint16_t HOLDING_REGS_SIZE = 256;
 static uint16_t holdingRegs[HOLDING_REGS_SIZE] = {0};
 
 // Modbus health instrumentation (ultra-light)
@@ -417,6 +417,7 @@ const uint16_t HR_CO2_CAL_I_MAX_MA_X100  = 45; // CO2 current max (mA): typicall
 const uint16_t HR_CAL_CMD               = 50; // 1=apply (RAM), 2=save (NVM), 3=restore defaults
 const uint16_t HR_CAL_STATUS            = 51; // status/error codes (see register map)
 const uint16_t HR_SWEEP_RELAY_ON_MS     = 52; // sweep relay ON dwell time (ms)
+const uint16_t HR_DEBUG_COIL4           = 250; // TEMP DEBUG - mirrors COIL_CMD_RELAY_TEST runtime value
 
 // Diagnostics registers (Opta writes, HMI can read)
 // Reserved block: HR60..HR71
@@ -2376,6 +2377,7 @@ void loop() {
     int coil2 = modbusTCPServer.coilRead(COIL_CMD_SCRUB_CFG1_START);
     int coil3 = modbusTCPServer.coilRead(COIL_CMD_SCRUB_CFG2_START);
     int coil4 = modbusTCPServer.coilRead(COIL_CMD_RELAY_TEST);
+    mb_write(HR_DEBUG_COIL4, (uint16_t)coil4);
     int coil5 = modbusTCPServer.coilRead(COIL_CMD_CALIBRATE_ABORT);
 
     if (coil0) {
