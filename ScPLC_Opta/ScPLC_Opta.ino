@@ -96,6 +96,7 @@ static inline bool isHoldingRegWritable(uint16_t addr) {
   if (addr >= 40 && addr <= 45) return true; // CO2 calibration/config
   if (addr == 52) return true; // sweep relay ON dwell time (ms)
   if (addr == 53) return true; // sweep select mask (12-bit)
+  if (addr == 54) return true; // calibration duration (seconds)
 
   // Control ownership arbitration (reserved for Option B later)
   if (addr == 100 || addr == 101 || addr == 105) return true; // CONTROL_OWNER / CONTROL_CMD_ID / HMI_HEARTBEAT
@@ -253,7 +254,9 @@ enum class Step : uint8_t {
 // Measurement
 const unsigned long MEASUREMENT_TIME_MS = 120000UL; // 120 s
 // Calibration
-const unsigned long CALIBRATION_TIME_MS = 600000UL; // 10 minutes
+const unsigned long CALIBRATION_TIME_MS_DEFAULT = 600000UL; // 10 minutes
+const unsigned long CALIBRATION_TIME_MS_MIN = 60000UL; // 1 minute
+const unsigned long CALIBRATION_TIME_MS_MAX = 3600000UL; // 60 minutes
 const unsigned long SAFE_ABORT_MS = 1500UL;
 
 // Aeration
@@ -287,10 +290,26 @@ unsigned long pendingAerationPart2Time = 0;
 // Calibration Timing Block v1 runtime state (code addresses HR189..HR198 = external HR190..HR199)
 static uint16_t calTimingSeq = 0;
 static uint32_t calTimingCycleId = 0;
-static uint32_t calTimingDurationS = (CALIBRATION_TIME_MS / 1000UL);
+static uint32_t calTimingDurationS = (CALIBRATION_TIME_MS_DEFAULT / 1000UL);
 static uint32_t calTimingRemainingS = 0;
 static uint32_t calTimingLastUpdateMs = 0;
 static uint16_t calTimingResultCode = 0;
+
+static inline unsigned long clampCalibrationDurationMs(unsigned long valueMs) {
+  if (valueMs < CALIBRATION_TIME_MS_MIN) return CALIBRATION_TIME_MS_MIN;
+  if (valueMs > CALIBRATION_TIME_MS_MAX) return CALIBRATION_TIME_MS_MAX;
+  return valueMs;
+}
+
+static inline uint16_t clampCalibrationDurationS(uint32_t valueS) {
+  uint32_t minS = (uint32_t)(CALIBRATION_TIME_MS_MIN / 1000UL);
+  uint32_t maxS = (uint32_t)(CALIBRATION_TIME_MS_MAX / 1000UL);
+  if (valueS < minS) return (uint16_t)minS;
+  if (valueS > maxS) return (uint16_t)maxS;
+  return (uint16_t)valueS;
+}
+
+static unsigned long calibrationTimeMs = CALIBRATION_TIME_MS_DEFAULT;
 
 // USER button no longer used; HMI triggers measurement via Modbus coil
 // bool lastUserButtonState = HIGH;
@@ -348,6 +367,7 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //  - HR40..45  (scaled): CO2 calibration/config
 //  - HR52      (u16 ms): sweep relay ON dwell time (clamped 100..60000)
 //  - HR53      (u16):    sweep select mask (clamped 0x0000..0x0FFF; 0=>ALL at runtime)
+//  - HR54      (u16 s):  calibration duration (clamped 60..3600)
 //  - HR100..101 (u16):   Control ownership arbitration
 //                      HR100 = CONTROL_OWNER (0=NONE, 1=HMI, 2=PI)
 //                      HR101 = CONTROL_CMD_ID (caller-provided u16 tag; Opta may overwrite)
@@ -420,6 +440,7 @@ const uint16_t HR_CAL_CMD               = 50; // 1=apply (RAM), 2=save (NVM), 3=
 const uint16_t HR_CAL_STATUS            = 51; // status/error codes (see register map)
 const uint16_t HR_SWEEP_RELAY_ON_MS     = 52; // sweep relay ON dwell time (ms)
 const uint16_t HR_SWEEP_SELECT_MASK     = 53; // sweep select mask (u16; bits 0..11)
+const uint16_t HR_CAL_DURATION_S        = 54; // calibration duration (seconds)
 
 // Diagnostics registers (Opta writes, HMI can read)
 // Reserved block: HR60..HR71
@@ -661,7 +682,7 @@ static inline void publishCalibrationTimingBlock(bool valid, bool durationLatche
 
 static inline void setCalibrationTimingIdle() {
   calTimingRemainingS = 0;
-  calTimingDurationS = (uint32_t)(CALIBRATION_TIME_MS / 1000UL);
+  calTimingDurationS = (uint32_t)(calibrationTimeMs / 1000UL);
   publishCalibrationTimingBlock(false, false);
 }
 
@@ -1703,11 +1724,11 @@ void applyCalibrationOutputs() {
 void startCalibrationCycle() {
   setAllOutputsOff();
   applyCalibrationOutputs();
-  startStep(Step::Calibrate, CALIBRATION_TIME_MS);
+  startStep(Step::Calibrate, calibrationTimeMs);
 
   calTimingCycleId++;
   calTimingResultCode = 0;
-  calTimingDurationS = (uint32_t)(CALIBRATION_TIME_MS / 1000UL);
+  calTimingDurationS = (uint32_t)(calibrationTimeMs / 1000UL);
   calTimingRemainingS = calTimingDurationS;
   calTimingLastUpdateMs = millis();
   publishCalibrationTimingBlock(true, true);
@@ -1742,9 +1763,9 @@ void handleCalibration() {
       if ((uint32_t)(now - calTimingLastUpdateMs) >= 1000u) {
         calTimingLastUpdateMs = now;
         uint32_t elapsedMs = (uint32_t)(now - stepStartMs);
-        uint32_t remainingMs = (elapsedMs >= (uint32_t)CALIBRATION_TIME_MS)
+        uint32_t remainingMs = (elapsedMs >= (uint32_t)stepDurationMs)
           ? 0u
-          : ((uint32_t)CALIBRATION_TIME_MS - elapsedMs);
+          : ((uint32_t)stepDurationMs - elapsedMs);
         uint32_t nextRemainingS = (remainingMs + 999u) / 1000u;
         if (nextRemainingS > calTimingRemainingS) nextRemainingS = calTimingRemainingS;
         calTimingRemainingS = nextRemainingS;
@@ -2148,6 +2169,7 @@ void setup() {
   mb_write(HR_CAL_CMD, 0);
   mb_write(HR_CAL_STATUS, 0);
   mb_write(HR_SWEEP_RELAY_ON_MS, SWEEP_RELAY_ON_MS_DEFAULT);
+  mb_write(HR_CAL_DURATION_S, (uint16_t)(CALIBRATION_TIME_MS_DEFAULT / 1000UL));
   setCalibrationTimingIdle();
   {
     uint16_t loadErr = 0;
@@ -2415,6 +2437,19 @@ void loop() {
         if (raw != clamped || holdingRegs[HR_SWEEP_SELECT_MASK] != clamped) {
           mb_write(HR_SWEEP_SELECT_MASK, clamped);
         }
+      }
+    }
+
+    // Calibration duration clamp (RW register HR54, seconds).
+    {
+      long rawDurationValue = modbusTCPServer.holdingRegisterRead((int)HR_CAL_DURATION_S);
+      if (rawDurationValue >= 0) {
+        uint16_t raw = (uint16_t)rawDurationValue;
+        uint16_t clamped = clampCalibrationDurationS((uint32_t)raw);
+        if (raw != clamped || holdingRegs[HR_CAL_DURATION_S] != clamped) {
+          mb_write(HR_CAL_DURATION_S, clamped);
+        }
+        calibrationTimeMs = clampCalibrationDurationMs((unsigned long)clamped * 1000UL);
       }
     }
 
