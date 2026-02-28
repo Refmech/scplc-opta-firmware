@@ -405,6 +405,7 @@ const uint16_t COIL_CMD_SCRUB_CFG1_START = 2; // 00003 (new)
 const uint16_t COIL_CMD_SCRUB_CFG2_START = 3; // 00004 (new) 
 const uint16_t COIL_CMD_RELAY_TEST       = 4; // 00005 (start/stop relay sweep)
 const uint16_t COIL_CMD_CALIBRATE_ABORT  = 5; // 00006 (edge-triggered abort during Step::Calibrate)
+const uint16_t COIL_CMD_STOP_ALL_OUTPUTS = 6; // 00007 (immediate stop: de-energize all outputs + Idle)
 
 
 // Holding registers
@@ -2153,9 +2154,9 @@ void setup() {
   }
 
   // Minimal, safe register map:
-  // - Coils 0..5: momentary commands from HMI/Pi
+  // - Coils 0..6: momentary commands from HMI/Pi
   // - Holding regs 0..199: allows reads of HR10..HR20 and HR120.. with no crashes
-  modbusTCPServer.configureCoils(0, 6);
+  modbusTCPServer.configureCoils(0, 7);
   modbusTCPServer.configureHoldingRegisters(0, HOLDING_REGS_SIZE);
 
   if (Serial) {
@@ -2165,7 +2166,7 @@ void setup() {
   }
 
   // Initialize coils low
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < 7; i++) {
     (void)modbusTCPServer.coilWrite(i, 0);
   }
 
@@ -2493,6 +2494,7 @@ void loop() {
     int coil3 = modbusTCPServer.coilRead(COIL_CMD_SCRUB_CFG2_START);
     int coil4 = modbusTCPServer.coilRead(COIL_CMD_RELAY_TEST);
     int coil5 = modbusTCPServer.coilRead(COIL_CMD_CALIBRATE_ABORT);
+    int coil6 = modbusTCPServer.coilRead(COIL_CMD_STOP_ALL_OUTPUTS);
 
     if (coil0) {
       (void)modbusTCPServer.coilWrite(COIL_CMD_MEASURE_START, 0);
@@ -2520,6 +2522,23 @@ void loop() {
       if (currentMode == RoomMode::Calibrating && currentStep == Step::Calibrate) {
         abortCalibrationCycle();
       }
+    }
+    if (coil6) {
+      (void)modbusTCPServer.coilWrite(COIL_CMD_STOP_ALL_OUTPUTS, 0);
+      if (LOG_ACTIONS) Serial.println("[MB] coil6=1 -> stopCurrentActionNow");
+
+      setAllOutputsOff();
+      relaySweepStop();
+      pendingAerationPart2Time = 0;
+      currentMode = RoomMode::Idle;
+      currentStep = Step::None;
+      mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
+      mb_write(HR_STEP, (uint16_t)currentStep);
+
+      if (calTimingResultCode == 0) {
+        calTimingResultCode = 2; // aborted
+      }
+      setCalibrationTimingIdle();
     }
     // coil4 level command with state gating:
     // - start only when commanded ON, Idle, and not already active
