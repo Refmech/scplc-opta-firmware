@@ -97,6 +97,7 @@ static inline bool isHoldingRegWritable(uint16_t addr) {
   if (addr == 52) return true; // sweep relay ON dwell time (ms)
   if (addr == 53) return true; // sweep select mask (12-bit)
   if (addr == 54) return true; // calibration duration (seconds)
+  if (addr == 55) return true; // measurement duration (seconds)
 
   // Control ownership arbitration (reserved for Option B later)
   if (addr == 100 || addr == 101 || addr == 105) return true; // CONTROL_OWNER / CONTROL_CMD_ID / HMI_HEARTBEAT
@@ -252,7 +253,9 @@ enum class Step : uint8_t {
 // -----------------------------------------------------------------------------
 
 // Measurement
-const unsigned long MEASUREMENT_TIME_MS = 120000UL; // 120 s
+const unsigned long MEASUREMENT_TIME_MS_DEFAULT = 120000UL; // 120 s
+const unsigned long MEASUREMENT_TIME_MS_MIN = 1000UL; // 1 s
+const unsigned long MEASUREMENT_TIME_MS_MAX = 3600000UL; // 60 minutes
 // Calibration
 const unsigned long CALIBRATION_TIME_MS_DEFAULT = 600000UL; // 10 minutes
 const unsigned long CALIBRATION_TIME_MS_MIN = 60000UL; // 1 minute
@@ -309,6 +312,21 @@ static inline uint16_t clampCalibrationDurationS(uint32_t valueS) {
   return (uint16_t)valueS;
 }
 
+static inline unsigned long clampMeasurementDurationMs(unsigned long valueMs) {
+  if (valueMs < MEASUREMENT_TIME_MS_MIN) return MEASUREMENT_TIME_MS_MIN;
+  if (valueMs > MEASUREMENT_TIME_MS_MAX) return MEASUREMENT_TIME_MS_MAX;
+  return valueMs;
+}
+
+static inline uint16_t clampMeasurementDurationS(uint32_t valueS) {
+  uint32_t minS = (uint32_t)(MEASUREMENT_TIME_MS_MIN / 1000UL);
+  uint32_t maxS = (uint32_t)(MEASUREMENT_TIME_MS_MAX / 1000UL);
+  if (valueS < minS) return (uint16_t)minS;
+  if (valueS > maxS) return (uint16_t)maxS;
+  return (uint16_t)valueS;
+}
+
+static unsigned long measurementTimeMs = MEASUREMENT_TIME_MS_DEFAULT;
 static unsigned long calibrationTimeMs = CALIBRATION_TIME_MS_DEFAULT;
 
 // USER button no longer used; HMI triggers measurement via Modbus coil
@@ -368,6 +386,7 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //  - HR52      (u16 ms): sweep relay ON dwell time (clamped 100..60000)
 //  - HR53      (u16):    sweep select mask (clamped 0x0000..0x0FFF; 0=>ALL at runtime)
 //  - HR54      (u16 s):  calibration duration (clamped 60..3600)
+//  - HR55      (u16 s):  measurement duration (clamped 1..3600)
 //  - HR100..101 (u16):   Control ownership arbitration
 //                      HR100 = CONTROL_OWNER (0=NONE, 1=HMI, 2=PI)
 //                      HR101 = CONTROL_CMD_ID (caller-provided u16 tag; Opta may overwrite)
@@ -441,6 +460,7 @@ const uint16_t HR_CAL_STATUS            = 51; // status/error codes (see registe
 const uint16_t HR_SWEEP_RELAY_ON_MS     = 52; // sweep relay ON dwell time (ms)
 const uint16_t HR_SWEEP_SELECT_MASK     = 53; // sweep select mask (u16; bits 0..11)
 const uint16_t HR_CAL_DURATION_S        = 54; // calibration duration (seconds)
+const uint16_t HR_MEAS_DURATION_S       = 55; // measurement duration (seconds)
 
 // Diagnostics registers (Opta writes, HMI can read)
 // Reserved block: HR60..HR71
@@ -1659,7 +1679,7 @@ void startStep(Step step, unsigned long durationMs) {
 void startMeasurementCycle() {
   setAllOutputsOff();
   applyMeasurementOutputs();
-  startStep(Step::Meas, MEASUREMENT_TIME_MS);
+  startStep(Step::Meas, measurementTimeMs);
   currentMode = RoomMode::Measuring;
 
   // Reflect state into Modbus holding registers
@@ -2170,6 +2190,7 @@ void setup() {
   mb_write(HR_CAL_STATUS, 0);
   mb_write(HR_SWEEP_RELAY_ON_MS, SWEEP_RELAY_ON_MS_DEFAULT);
   mb_write(HR_CAL_DURATION_S, (uint16_t)(CALIBRATION_TIME_MS_DEFAULT / 1000UL));
+  mb_write(HR_MEAS_DURATION_S, (uint16_t)(MEASUREMENT_TIME_MS_DEFAULT / 1000UL));
   setCalibrationTimingIdle();
   {
     uint16_t loadErr = 0;
@@ -2443,6 +2464,17 @@ void loop() {
     // Calibration duration clamp (RW register HR54, seconds).
     {
       long rawDurationValue = modbusTCPServer.holdingRegisterRead((int)HR_CAL_DURATION_S);
+          {
+            long rawMeasDurationValue = modbusTCPServer.holdingRegisterRead((int)HR_MEAS_DURATION_S);
+            if (rawMeasDurationValue >= 0) {
+              uint16_t raw = (uint16_t)rawMeasDurationValue;
+              uint16_t clamped = clampMeasurementDurationS((uint32_t)raw);
+              if (raw != clamped || holdingRegs[HR_MEAS_DURATION_S] != clamped) {
+                mb_write(HR_MEAS_DURATION_S, clamped);
+              }
+              measurementTimeMs = clampMeasurementDurationMs((unsigned long)clamped * 1000UL);
+            }
+          }
       if (rawDurationValue >= 0) {
         uint16_t raw = (uint16_t)rawDurationValue;
         uint16_t clamped = clampCalibrationDurationS((uint32_t)raw);
