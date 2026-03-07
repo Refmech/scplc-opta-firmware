@@ -1,0 +1,51 @@
+name: opta-firmware-ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache Arduino data
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+            ~/.cache/arduino-cli
+          key: ${{ runner.os }}-arduino-${{ hashFiles('**/*.ino', '**/*.cpp', '**/*.h', '.github/workflows/**') }}
+          restore-keys: |
+            ${{ runner.os }}-arduino-
+
+      - name: Install core
+        shell: bash
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:mbed_opta
+
+      - name: Install libraries
+        shell: bash
+        run: |
+          arduino-cli lib update-index
+          arduino-cli lib install "Ethernet" "ArduinoRS485" "ArduinoModbus" "Arduino_Opta_Blueprint"
+
+      - name: Compile (Opta)
+        shell: bash
+        run: |
+          BUILD_ID_HEX="${GITHUB_SHA:0:8}"
+          echo "Using SCPLC_FW_BUILD_ID=0x${BUILD_ID_HEX}"
+          arduino-cli compile \
+            --fqbn arduino:mbed_opta:opta \
+            --warnings all \
+            --build-property "compiler.cpp.extra_flags=-DSCPLC_FW_BUILD_ID=0x${BUILD_ID_HEX}u" \
+            ScPLC_Opta
