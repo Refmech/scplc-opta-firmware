@@ -149,3 +149,9 @@ Digital inputs/outputs and relay indices are defined in:
 - Confirm Ethernet link status on boot via Serial output.
 - If expansions are connected, the firmware periodically rescans for A0602/D1608E and prints discovery logs.
 
+## Project hygiene
+
+- Changelog: [docs/CHANGELOG.md](docs/CHANGELOG.md)
+- Release checklist: [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)
+- Development workflow: [ScPLC_Opta/DEVELOPMENT_WORKFLOW.md](ScPLC_Opta/DEVELOPMENT_WORKFLOW.md)
+
