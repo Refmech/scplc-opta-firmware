@@ -40,6 +40,27 @@ static const bool LOG_DISCOVERY   = true;  // expansion discovery/rescan logs
 static const bool LOG_SWEEP_EVENTS= true;  // sweep BEGIN/STOP messages
 static const bool LOG_A0602_DIAG  = true;  // once-per-second analog mode/raw/mA/% logs
 
+// -----------------------------------------------------------------------------
+// Firmware identity (mirrored to Modbus holding registers HR5..HR9)
+//
+// Defaults are intentionally stable for Arduino IDE builds.
+// CI may override these via compiler flags (example):
+//   -DSCPLC_FW_BUILD_ID=0xA1B2C3D4u
+// -----------------------------------------------------------------------------
+#ifndef SCPLC_FW_BUILD_ID
+  #define SCPLC_FW_BUILD_ID 250122u
+#endif
+
+#ifndef SCPLC_FW_VERSION_MAJOR
+  #define SCPLC_FW_VERSION_MAJOR 1
+#endif
+#ifndef SCPLC_FW_VERSION_MINOR
+  #define SCPLC_FW_VERSION_MINOR 3
+#endif
+#ifndef SCPLC_FW_VERSION_PATCH
+  #define SCPLC_FW_VERSION_PATCH 0
+#endif
+
 // Use ArduinoModbus for a standards-compliant Modbus TCP server.
 // Set to 0 to temporarily fall back to the legacy custom parser.
 #define USE_ARDUINO_MODBUS 1
@@ -2172,13 +2193,24 @@ void setup() {
 
   // Firmware identity (RO): lets clients confirm the correct firmware is running.
   {
-    const uint32_t fwBuildId = 250122u;
+    const uint32_t fwBuildId = (uint32_t)SCPLC_FW_BUILD_ID;
     mb_write(HR_FW_BUILD_ID_LO, (uint16_t)(fwBuildId & 0xFFFFu));
     mb_write(HR_FW_BUILD_ID_HI, (uint16_t)((fwBuildId >> 16) & 0xFFFFu));
     // Semantic version (RO): UI-friendly major.minor.patch
-    mb_write(HR_FW_VERSION_MAJOR, 1);
-    mb_write(HR_FW_VERSION_MINOR, 3);
-    mb_write(HR_FW_VERSION_PATCH, 0);
+    mb_write(HR_FW_VERSION_MAJOR, (uint16_t)SCPLC_FW_VERSION_MAJOR);
+    mb_write(HR_FW_VERSION_MINOR, (uint16_t)SCPLC_FW_VERSION_MINOR);
+    mb_write(HR_FW_VERSION_PATCH, (uint16_t)SCPLC_FW_VERSION_PATCH);
+
+    if (LOG_DISCOVERY && Serial) {
+      Serial.print("[FW] build_id=0x");
+      Serial.print(fwBuildId, HEX);
+      Serial.print(" version=");
+      Serial.print((int)SCPLC_FW_VERSION_MAJOR);
+      Serial.print('.');
+      Serial.print((int)SCPLC_FW_VERSION_MINOR);
+      Serial.print('.');
+      Serial.println((int)SCPLC_FW_VERSION_PATCH);
+    }
   }
 
   // Publish default calibration parameters into holding registers.
