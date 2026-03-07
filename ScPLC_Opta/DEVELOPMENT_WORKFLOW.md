@@ -26,25 +26,34 @@ This document defines the required development workflow for the ScPLC Opta firmw
 - Commit locally.
 - Push branch to GitHub.
 - Open a pull request.
-- Use the SSH agent to pull that branch onto the Pi and run runtime validation on the Pi.
-- If Pi branch tests pass:
+- Use the SSH agent to pull that branch onto the local test Pi and run runtime validation on hardware.
+- If branch tests pass on the local test Pi:
   - Merge from desktop workflow (local and GitHub).
-  - Use the SSH agent to pull `main` on the Pi.
-  - Run final validation on Pi against `main`.
+  - Use the SSH agent to pull `main` on the field/customer Pi.
+  - Run final validation on field/customer Pi against `main`.
 
-## 4. SSH Agent Policy
+## 4. Pi Role Model (Test vs Field)
+
+- Treat every Pi as if it were customer-field infrastructure, including local development hardware.
+- Local test Pi is used for pre-merge branch validation only.
+- Field/customer Pi is updated from `main` only after PR merge.
+- Promotion path is mandatory:
+  - Desktop feature branch -> local test Pi branch test -> PR merge -> `main` -> field/customer Pi pull of `main`.
+- No direct source code edits are made on any Pi (test or field).
+
+## 5. SSH Agent Policy
 
 - The SSH agent is used for Pi commands, prompts, deployment pulls, and operational checks.
 - The SSH agent is not used to modify server source code.
 - The Pi remote repository is configured to reject pushes from the Pi.
 
-## 5. Merge Gate
+## 6. Merge Gate
 
 - No merge until target-environment validation passes.
 - Opta merge gate: hardware flash test passes.
 - Pi merge gate: branch test on Pi passes, then post-merge `main` test passes.
 
-## 6. Hygiene (High Priority, Mandatory)
+## 7. Hygiene (High Priority, Mandatory)
 
 - Hygiene is enforced at every stage and is a merge blocker.
 - Keep branches focused and small; avoid unrelated changes in a pull request.
