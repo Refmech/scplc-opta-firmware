@@ -62,3 +62,15 @@ This document defines the required development workflow for the ScPLC Opta firmw
 - Do not bypass review, validation, or deployment checks.
 - Keep repository documentation aligned with actual operational behavior.
 - If hygiene standards are not met, fix hygiene first, then continue feature work.
+
+## 8. Branch/PR Iteration Pattern (Current Practice)
+
+- For each requested feature or change set, create a new feature branch from `main`.
+- Keep all follow-up fixes for that feature on the same branch/PR until the user confirms it passes.
+- Push incremental commits as feedback comes in (do not open a new PR for each tweak on the same feature).
+- Do not merge on "looks good" alone; merge only after explicit pass confirmation (for example: "all passed. merge").
+- After merge:
+  - Verify `origin/main` contains the merge commit.
+  - Delete the feature branch (local and remote).
+  - Confirm repo state is clean on `main`.
+- For the next unrelated request, start a fresh feature branch and repeat the cycle.
