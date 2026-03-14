@@ -1328,6 +1328,13 @@ static inline void setOutputPin(int pin, bool on) {
   else if (pin == PIN_FAN_2) outputPinState[1] = on;
   else if (pin == PIN_RM_V_1) outputPinState[2] = on;
   else if (pin == PIN_N2_RM_V_1) outputPinState[3] = on;
+
+  // Keep Opta D0..D3 LEDs aligned with their corresponding D0..D3 outputs.
+  if (pin == PIN_FAN_1) mirrorRelayToLed(1, on);
+  else if (pin == PIN_FAN_2) mirrorRelayToLed(2, on);
+  else if (pin == PIN_RM_V_1) mirrorRelayToLed(3, on);
+  else if (pin == PIN_N2_RM_V_1) mirrorRelayToLed(4, on);
+
   updateOutputsSnapshot();
 }
 
@@ -1374,8 +1381,6 @@ void setRelay(int relayIndex, bool on) {
   Serial.print(" -> ");
   Serial.println(on ? "ON" : "OFF");
 
-  // Mirror relay state to built-in LED
-  mirrorRelayToLed(relayIndex, on);
   setRelayState(relayIndex, on);
 }
 
@@ -1473,8 +1478,6 @@ static void relaySweepSetRelay(uint8_t relayIndex1Based, bool on) {
   #else
   (void)relayIndex1Based; (void)on;
   #endif
-  // Mirror to onboard LED for quick visual confirmation
-  mirrorRelayToLed(relayIndex1Based, on);
   setRelayState(relayIndex1Based, on);
 }
 
@@ -2572,18 +2575,19 @@ void loop() {
       }
       setCalibrationTimingIdle();
     }
-    // coil4 level command with state gating:
-    // - start only when commanded ON, Idle, and not already active
-    // - stop when commanded OFF and currently active
+    // coil4 edge-driven command handling:
+    // - start only on rising edge (0->1), when Idle and not already active
+    // - stop only on falling edge (1->0), when currently active
+    // This prevents auto-retrigger if coil4 remains high after a completed sweep.
     static int lastCoil4 = 0;
     bool coil4Edge = (coil4 != lastCoil4);
     if (coil4Edge) {
       lastCoil4 = coil4;
     }
-    if (coil4 && currentMode == RoomMode::Idle && !relaySweep.sweep_active) {
+    if (coil4Edge && coil4 && currentMode == RoomMode::Idle && !relaySweep.sweep_active) {
       if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 -> relay sequencer BEGIN");
       relaySweepBegin();
-    } else if (!coil4 && relaySweep.sweep_active) {
+    } else if (coil4Edge && !coil4 && relaySweep.sweep_active) {
       if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=0 -> relay sequencer STOP");
       relaySweepStop();
     } else if (coil4Edge && coil4 && currentMode != RoomMode::Idle && !relaySweep.sweep_active) {
