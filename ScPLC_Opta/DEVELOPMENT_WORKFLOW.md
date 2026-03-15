@@ -13,6 +13,11 @@ This document defines the required development workflow for the ScPLC Opta firmw
 
 - Make code changes locally in `ScPLC_Opta`.
 - Flash and test on Opta hardware from desktop using Arduino CLI.
+- Agent flashing rule (mandatory): when Opta flashing is needed, the agent always uses `arduino-cli` from the desktop workflow (never IDE/manual upload flows).
+- Required CLI sequence for flashing tasks:
+  - Detect board/port (`arduino-cli board list`).
+  - Compile with the correct FQBN (`arduino:mbed_opta:opta`).
+  - Upload to the detected serial port with `arduino-cli upload`.
 - If tests pass:
   - Commit locally.
   - Push branch to GitHub.
