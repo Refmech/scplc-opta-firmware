@@ -122,6 +122,7 @@ static inline bool isHoldingRegWritable(uint16_t addr) {
 
   // Control ownership arbitration (reserved for Option B later)
   if (addr == 100 || addr == 101 || addr == 105) return true; // CONTROL_OWNER / CONTROL_CMD_ID / HMI_HEARTBEAT
+  if (addr == 106 || addr == 107) return true; // MANUAL_OUTPUT_INDEX / MANUAL_OUTPUT_STATE
 
   // CMD register (write triggers action; firmware clears)
   if (addr == 50) return true;
@@ -412,6 +413,9 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //                      HR100 = CONTROL_OWNER (0=NONE, 1=HMI, 2=PI)
 //                      HR101 = CONTROL_CMD_ID (caller-provided u16 tag; Opta may overwrite)
 //                      HR102..109 reserved for future metadata (reason/timeouts/etc)
+//  - HR106..107 (u16):   Manual single-output control parameters
+//                      HR106 = MANUAL_OUTPUT_INDEX (0..11; 0..3=D0..D3, 4..11=Relay1..Relay8)
+//                      HR107 = MANUAL_OUTPUT_STATE (0/1)
 //
 // CMD (command semantics; write triggers action, value is cleared by firmware):
 //  - HR50: HR_CAL_CMD (1=apply, 2=save stub, 3=restore defaults)
@@ -427,6 +431,7 @@ const uint16_t COIL_CMD_SCRUB_CFG2_START = 3; // 00004 (new)
 const uint16_t COIL_CMD_RELAY_TEST       = 4; // 00005 (start/stop relay sweep)
 const uint16_t COIL_CMD_CALIBRATE_ABORT  = 5; // 00006 (edge-triggered abort during Step::Calibrate)
 const uint16_t COIL_CMD_STOP_ALL_OUTPUTS = 6; // 00007 (immediate stop: de-energize all outputs + Idle)
+const uint16_t COIL_CMD_MANUAL_OUTPUT_APPLY = 7; // 00008 (edge-triggered apply manual output state)
 
 
 // Holding registers
@@ -533,6 +538,12 @@ const uint16_t HR_CONTROL_LAST_CHANGE_UNIX_S_LO = 103;
 const uint16_t HR_CONTROL_LAST_CHANGE_UNIX_S_HI = 104;
 
 const uint16_t HR_HMI_HEARTBEAT                 = 105; // HMI heartbeat (RW u16; HMI increments)
+
+// Manual single-output command parameters (RW; consumed when COIL_CMD_MANUAL_OUTPUT_APPLY edges)
+// - HR106: output index (0..11) where 0..3 => D0..D3, 4..11 => relay1..relay8
+// - HR107: output state (0/1)
+const uint16_t HR_MANUAL_OUTPUT_INDEX           = 106;
+const uint16_t HR_MANUAL_OUTPUT_STATE           = 107;
 
 static const uint32_t HMI_LEASE_TIMEOUT_MS = 5000u; // 5s: if no heartbeat changes, HMI ownership times out
 static uint16_t hmiHeartbeatLastValue = 0;
@@ -2178,9 +2189,9 @@ void setup() {
   }
 
   // Minimal, safe register map:
-  // - Coils 0..6: momentary commands from HMI/Pi
+  // - Coils 0..7: momentary commands from HMI/Pi
   // - Holding regs 0..199: allows reads of HR10..HR20 and HR120.. with no crashes
-  modbusTCPServer.configureCoils(0, 7);
+  modbusTCPServer.configureCoils(0, 8);
   modbusTCPServer.configureHoldingRegisters(0, HOLDING_REGS_SIZE);
 
   if (Serial) {
@@ -2190,7 +2201,7 @@ void setup() {
   }
 
   // Initialize coils low
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 8; i++) {
     (void)modbusTCPServer.coilWrite(i, 0);
   }
 
@@ -2530,6 +2541,9 @@ void loop() {
     int coil4 = modbusTCPServer.coilRead(COIL_CMD_RELAY_TEST);
     int coil5 = modbusTCPServer.coilRead(COIL_CMD_CALIBRATE_ABORT);
     int coil6 = modbusTCPServer.coilRead(COIL_CMD_STOP_ALL_OUTPUTS);
+    int coil7 = modbusTCPServer.coilRead(COIL_CMD_MANUAL_OUTPUT_APPLY);
+
+    bool stopAllThisCycle = false;
 
     if (coil0) {
       (void)modbusTCPServer.coilWrite(COIL_CMD_MEASURE_START, 0);
@@ -2562,6 +2576,8 @@ void loop() {
       (void)modbusTCPServer.coilWrite(COIL_CMD_STOP_ALL_OUTPUTS, 0);
       if (LOG_ACTIONS) Serial.println("[MB] coil6=1 -> stopCurrentActionNow");
 
+      stopAllThisCycle = true;
+
       setAllOutputsOff();
       relaySweepStop();
       pendingAerationPart2Time = 0;
@@ -2574,6 +2590,47 @@ void loop() {
         calTimingResultCode = 2; // aborted
       }
       setCalibrationTimingIdle();
+    }
+
+    // Manual single-output apply (coil7 OFF->ON edge): drives exactly one output.
+    // Intended for controlled testing only; does not touch other outputs.
+    // Guard against conflicts with active processes.
+    static int lastCoil7 = 0;
+    bool coil7Edge = (coil7 != lastCoil7);
+    if (coil7Edge) {
+      lastCoil7 = coil7;
+    }
+    if (coil7Edge && coil7) {
+      (void)modbusTCPServer.coilWrite(COIL_CMD_MANUAL_OUTPUT_APPLY, 0);
+
+      if (stopAllThisCycle) {
+        if (LOG_ACTIONS) Serial.println("[MB] coil7=1 ignored (stop-all this cycle)");
+      } else if (currentMode != RoomMode::Idle || relaySweep.sweep_active) {
+        if (LOG_ACTIONS) Serial.println("[MB] coil7=1 ignored (not Idle or sweep active)");
+      } else if (controlOwner == CONTROL_OWNER_NONE) {
+        if (LOG_ACTIONS) Serial.println("[MB] coil7=1 ignored (no control owner)");
+      } else {
+        long rawIdx = modbusTCPServer.holdingRegisterRead((int)HR_MANUAL_OUTPUT_INDEX);
+        long rawState = modbusTCPServer.holdingRegisterRead((int)HR_MANUAL_OUTPUT_STATE);
+        if (rawIdx < 0 || rawState < 0) {
+          if (LOG_ACTIONS) Serial.println("[MB] coil7=1 ignored (bad HR read)");
+        } else {
+          uint16_t idx = (uint16_t)rawIdx;
+          bool on = ((uint16_t)rawState) != 0u;
+          if (idx > 11u) {
+            if (LOG_ACTIONS) Serial.println("[MB] coil7=1 ignored (index out of range)");
+          } else {
+            uint8_t out1 = (uint8_t)(idx + 1u); // 0..11 => 1..12
+            relaySweepSetOutput(out1, on);
+            if (LOG_ACTIONS) {
+              Serial.print("[MB] coil7=1 -> manual output idx=");
+              Serial.print((int)idx);
+              Serial.print(" state=");
+              Serial.println(on ? "ON" : "OFF");
+            }
+          }
+        }
+      }
     }
     // coil4 edge-driven command handling:
     // - start only on rising edge (0->1), when Idle and not already active
