@@ -302,6 +302,15 @@ const unsigned long CFG2_XTRREGEN_MS = 150000UL;
 const unsigned long CFG2_WAIT_MS     = 10000UL;
 const unsigned long CFG2_RMMTFILL_MS = 25000UL;
 
+static const uint16_t SCRUB_CYCLE_TIMING_MIN_S = 1;
+static const uint16_t SCRUB_CYCLE_TIMING_MAX_S = 3600;
+
+static inline uint16_t clampScrubCycleTimingS(uint32_t valueS) {
+  if (valueS < SCRUB_CYCLE_TIMING_MIN_S) return SCRUB_CYCLE_TIMING_MIN_S;
+  if (valueS > SCRUB_CYCLE_TIMING_MAX_S) return SCRUB_CYCLE_TIMING_MAX_S;
+  return (uint16_t)valueS;
+}
+
 // -----------------------------------------------------------------------------
 // Global state
 // -----------------------------------------------------------------------------
@@ -350,6 +359,16 @@ static inline uint16_t clampMeasurementDurationS(uint32_t valueS) {
 
 static unsigned long measurementTimeMs = MEASUREMENT_TIME_MS_DEFAULT;
 static unsigned long calibrationTimeMs = CALIBRATION_TIME_MS_DEFAULT;
+static unsigned long scrubCfg1AdsReg1Ms  = CFG1_ADSREG1_MS;
+static unsigned long scrubCfg1AdsReg2Ms  = CFG1_ADSREG2_MS;
+static unsigned long scrubCfg1XtrRegenMs = CFG1_XTRREGEN_MS;
+static unsigned long scrubCfg1WaitMs     = CFG1_WAIT_MS;
+static unsigned long scrubCfg1RmMtFillMs = CFG1_RMMTFILL_MS;
+static unsigned long scrubCfg2AdsReg1Ms  = CFG2_ADSREG1_MS;
+static unsigned long scrubCfg2AdsReg2Ms  = CFG2_ADSREG2_MS;
+static unsigned long scrubCfg2XtrRegenMs = CFG2_XTRREGEN_MS;
+static unsigned long scrubCfg2WaitMs     = CFG2_WAIT_MS;
+static unsigned long scrubCfg2RmMtFillMs = CFG2_RMMTFILL_MS;
 
 // USER button no longer used; HMI triggers measurement via Modbus coil
 // bool lastUserButtonState = HIGH;
@@ -489,6 +508,16 @@ const uint16_t HR_SWEEP_RELAY_ON_MS     = 52; // sweep relay ON dwell time (ms)
 const uint16_t HR_SWEEP_SELECT_MASK     = 53; // sweep select mask (u16; bits 0..11)
 const uint16_t HR_CAL_DURATION_S        = 54; // calibration duration (seconds)
 const uint16_t HR_MEAS_DURATION_S       = 55; // measurement duration (seconds)
+const uint16_t HR_SCRUB_CFG1_ADSREG1_S  = 72;
+const uint16_t HR_SCRUB_CFG1_ADSREG2_S  = 73;
+const uint16_t HR_SCRUB_CFG1_XTRREGEN_S = 74;
+const uint16_t HR_SCRUB_CFG1_WAIT_S     = 75;
+const uint16_t HR_SCRUB_CFG1_RMMTFILL_S = 76;
+const uint16_t HR_SCRUB_CFG2_ADSREG1_S  = 77;
+const uint16_t HR_SCRUB_CFG2_ADSREG2_S  = 78;
+const uint16_t HR_SCRUB_CFG2_XTRREGEN_S = 79;
+const uint16_t HR_SCRUB_CFG2_WAIT_S     = 80;
+const uint16_t HR_SCRUB_CFG2_RMMTFILL_S = 81;
 
 // Diagnostics registers (Opta writes, HMI can read)
 // Reserved block: HR60..HR71
@@ -1977,7 +2006,7 @@ void handleAeration() {
 void startScrubCfg1() {
   setAllOutputsOff();
   applyCfg1_AdsReg1Outputs();
-  startStep(Step::Cfg1_AdsReg1, CFG1_ADSREG1_MS);
+  startStep(Step::Cfg1_AdsReg1, scrubCfg1AdsReg1Ms);
   currentMode = RoomMode::ScrubbingCfg1;
   // Reflect state into Modbus holding registers immediately
   mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
@@ -1993,28 +2022,28 @@ void handleScrubCfg1() {
     case Step::Cfg1_AdsReg1:
       setAllOutputsOff();
       applyCfg1_AdsReg2Outputs();
-      startStep(Step::Cfg1_AdsReg2, CFG1_ADSREG2_MS);
+      startStep(Step::Cfg1_AdsReg2, scrubCfg1AdsReg2Ms);
       mb_write(HR_STEP, (uint16_t)currentStep);
       break;
 
     case Step::Cfg1_AdsReg2:
       setAllOutputsOff();
       applyCfg1_XtrRegenOutputs();
-      startStep(Step::Cfg1_XtrRegen, CFG1_XTRREGEN_MS);
+      startStep(Step::Cfg1_XtrRegen, scrubCfg1XtrRegenMs);
       mb_write(HR_STEP, (uint16_t)currentStep);
       break;
 
     case Step::Cfg1_XtrRegen:
       setAllOutputsOff();
       applyCfg1_WaitOutputs();
-      startStep(Step::Cfg1_Wait, CFG1_WAIT_MS);
+      startStep(Step::Cfg1_Wait, scrubCfg1WaitMs);
       mb_write(HR_STEP, (uint16_t)currentStep);
       break;
 
     case Step::Cfg1_Wait:
       setAllOutputsOff();
       applyCfg1_RmMtFillOutputs();
-      startStep(Step::Cfg1_RmMtFill, CFG1_RMMTFILL_MS);
+      startStep(Step::Cfg1_RmMtFill, scrubCfg1RmMtFillMs);
       mb_write(HR_STEP, (uint16_t)currentStep);
       break;
 
@@ -2038,7 +2067,7 @@ void handleScrubCfg1() {
 void startScrubCfg2() {
   setAllOutputsOff();
   applyCfg2_AdsReg1Outputs();
-  startStep(Step::Cfg2_AdsReg1, CFG2_ADSREG1_MS);
+  startStep(Step::Cfg2_AdsReg1, scrubCfg2AdsReg1Ms);
   currentMode = RoomMode::ScrubbingCfg2;
   // Reflect state into Modbus holding registers immediately
   mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
@@ -2054,28 +2083,28 @@ void handleScrubCfg2() {
     case Step::Cfg2_AdsReg1:
       setAllOutputsOff();
       applyCfg2_AdsReg2Outputs();
-      startStep(Step::Cfg2_AdsReg2, CFG2_ADSREG2_MS);
+      startStep(Step::Cfg2_AdsReg2, scrubCfg2AdsReg2Ms);
       mb_write(HR_STEP, (uint16_t)currentStep);
       break;
 
     case Step::Cfg2_AdsReg2:
       setAllOutputsOff();
       applyCfg2_XtrRegenOutputs();
-      startStep(Step::Cfg2_XtrRegen, CFG2_XTRREGEN_MS);
+      startStep(Step::Cfg2_XtrRegen, scrubCfg2XtrRegenMs);
       mb_write(HR_STEP, (uint16_t)currentStep);
       break;
 
     case Step::Cfg2_XtrRegen:
       setAllOutputsOff();
       applyCfg2_WaitOutputs();
-      startStep(Step::Cfg2_Wait, CFG2_WAIT_MS);
+      startStep(Step::Cfg2_Wait, scrubCfg2WaitMs);
       mb_write(HR_STEP, (uint16_t)currentStep);
       break;
 
     case Step::Cfg2_Wait:
       setAllOutputsOff();
       applyCfg2_RmMtFillOutputs();
-      startStep(Step::Cfg2_RmMtFill, CFG2_RMMTFILL_MS);
+      startStep(Step::Cfg2_RmMtFill, scrubCfg2RmMtFillMs);
       mb_write(HR_STEP, (uint16_t)currentStep);
       break;
 
@@ -2280,6 +2309,16 @@ void setup() {
   mb_write(HR_SWEEP_RELAY_ON_MS, SWEEP_RELAY_ON_MS_DEFAULT);
   mb_write(HR_CAL_DURATION_S, (uint16_t)(CALIBRATION_TIME_MS_DEFAULT / 1000UL));
   mb_write(HR_MEAS_DURATION_S, (uint16_t)(MEASUREMENT_TIME_MS_DEFAULT / 1000UL));
+  mb_write(HR_SCRUB_CFG1_ADSREG1_S,  (uint16_t)(CFG1_ADSREG1_MS / 1000UL));
+  mb_write(HR_SCRUB_CFG1_ADSREG2_S,  (uint16_t)(CFG1_ADSREG2_MS / 1000UL));
+  mb_write(HR_SCRUB_CFG1_XTRREGEN_S, (uint16_t)(CFG1_XTRREGEN_MS / 1000UL));
+  mb_write(HR_SCRUB_CFG1_WAIT_S,     (uint16_t)(CFG1_WAIT_MS / 1000UL));
+  mb_write(HR_SCRUB_CFG1_RMMTFILL_S, (uint16_t)(CFG1_RMMTFILL_MS / 1000UL));
+  mb_write(HR_SCRUB_CFG2_ADSREG1_S,  (uint16_t)(CFG2_ADSREG1_MS / 1000UL));
+  mb_write(HR_SCRUB_CFG2_ADSREG2_S,  (uint16_t)(CFG2_ADSREG2_MS / 1000UL));
+  mb_write(HR_SCRUB_CFG2_XTRREGEN_S, (uint16_t)(CFG2_XTRREGEN_MS / 1000UL));
+  mb_write(HR_SCRUB_CFG2_WAIT_S,     (uint16_t)(CFG2_WAIT_MS / 1000UL));
+  mb_write(HR_SCRUB_CFG2_RMMTFILL_S, (uint16_t)(CFG2_RMMTFILL_MS / 1000UL));
   setCalibrationTimingIdle();
   {
     uint16_t loadErr = 0;
@@ -2550,20 +2589,20 @@ void loop() {
       }
     }
 
-    // Calibration duration clamp (RW register HR54, seconds).
+    // Calibration/measurement duration clamp (RW registers HR54/HR55, seconds).
     {
       long rawDurationValue = modbusTCPServer.holdingRegisterRead((int)HR_CAL_DURATION_S);
-          {
-            long rawMeasDurationValue = modbusTCPServer.holdingRegisterRead((int)HR_MEAS_DURATION_S);
-            if (rawMeasDurationValue >= 0) {
-              uint16_t raw = (uint16_t)rawMeasDurationValue;
-              uint16_t clamped = clampMeasurementDurationS((uint32_t)raw);
-              if (raw != clamped || holdingRegs[HR_MEAS_DURATION_S] != clamped) {
-                mb_write(HR_MEAS_DURATION_S, clamped);
-              }
-              measurementTimeMs = clampMeasurementDurationMs((unsigned long)clamped * 1000UL);
-            }
+      {
+        long rawMeasDurationValue = modbusTCPServer.holdingRegisterRead((int)HR_MEAS_DURATION_S);
+        if (rawMeasDurationValue >= 0) {
+          uint16_t raw = (uint16_t)rawMeasDurationValue;
+          uint16_t clamped = clampMeasurementDurationS((uint32_t)raw);
+          if (raw != clamped || holdingRegs[HR_MEAS_DURATION_S] != clamped) {
+            mb_write(HR_MEAS_DURATION_S, clamped);
           }
+          measurementTimeMs = clampMeasurementDurationMs((unsigned long)clamped * 1000UL);
+        }
+      }
       if (rawDurationValue >= 0) {
         uint16_t raw = (uint16_t)rawDurationValue;
         uint16_t clamped = clampCalibrationDurationS((uint32_t)raw);
@@ -2571,6 +2610,38 @@ void loop() {
           mb_write(HR_CAL_DURATION_S, clamped);
         }
         calibrationTimeMs = clampCalibrationDurationMs((unsigned long)clamped * 1000UL);
+      }
+    }
+
+    // Scrub cycle timing clamp (RW registers HR72..HR81, seconds).
+    {
+      struct ScrubTimingBind {
+        uint16_t hr;
+        unsigned long* runtimeMs;
+      };
+      static ScrubTimingBind binds[] = {
+        { HR_SCRUB_CFG1_ADSREG1_S,  &scrubCfg1AdsReg1Ms },
+        { HR_SCRUB_CFG1_ADSREG2_S,  &scrubCfg1AdsReg2Ms },
+        { HR_SCRUB_CFG1_XTRREGEN_S, &scrubCfg1XtrRegenMs },
+        { HR_SCRUB_CFG1_WAIT_S,     &scrubCfg1WaitMs },
+        { HR_SCRUB_CFG1_RMMTFILL_S, &scrubCfg1RmMtFillMs },
+        { HR_SCRUB_CFG2_ADSREG1_S,  &scrubCfg2AdsReg1Ms },
+        { HR_SCRUB_CFG2_ADSREG2_S,  &scrubCfg2AdsReg2Ms },
+        { HR_SCRUB_CFG2_XTRREGEN_S, &scrubCfg2XtrRegenMs },
+        { HR_SCRUB_CFG2_WAIT_S,     &scrubCfg2WaitMs },
+        { HR_SCRUB_CFG2_RMMTFILL_S, &scrubCfg2RmMtFillMs },
+      };
+
+      for (size_t i = 0; i < (sizeof(binds) / sizeof(binds[0])); i++) {
+        long rawValue = modbusTCPServer.holdingRegisterRead((int)binds[i].hr);
+        if (rawValue < 0) continue;
+
+        uint16_t raw = (uint16_t)rawValue;
+        uint16_t clamped = clampScrubCycleTimingS((uint32_t)raw);
+        if (raw != clamped || holdingRegs[binds[i].hr] != clamped) {
+          mb_write(binds[i].hr, clamped);
+        }
+        *(binds[i].runtimeMs) = (unsigned long)clamped * 1000UL;
       }
     }
 
