@@ -432,6 +432,7 @@ const uint16_t COIL_CMD_RELAY_TEST       = 4; // 00005 (start/stop relay sweep)
 const uint16_t COIL_CMD_CALIBRATE_ABORT  = 5; // 00006 (edge-triggered abort during Step::Calibrate)
 const uint16_t COIL_CMD_STOP_ALL_OUTPUTS = 6; // 00007 (immediate stop: de-energize all outputs + Idle)
 const uint16_t COIL_CMD_MANUAL_OUTPUT_APPLY = 7; // 00008 (edge-triggered apply manual output state)
+const uint16_t COIL_CMD_SEQUENCE_PAUSE   = 8; // 00009 (level: 1=pause sequencing, 0=resume)
 
 
 // Holding registers
@@ -1450,6 +1451,9 @@ struct RelaySweepState {
 static RelaySweepState relaySweep = { false, 0, 0, false };
 static uint16_t sweepRelayOnTimeMsLatched = SWEEP_RELAY_ON_MS_DEFAULT;
 static uint16_t sweepSelectMaskLatched = 0x0FFFu;
+static bool sequencePauseActive = false;
+static uint32_t sequencePauseStartedMs = 0;
+static const uint32_t SEQUENCE_PAUSE_TIMEOUT_MS = 300000u; // 5 minutes
 
 static void relaySweepSetRelay(uint8_t relayIndex1Based, bool on);
 
@@ -1564,6 +1568,44 @@ static inline void relaySweepTick(uint32_t nowMs) {
     } else {
       relaySweepStop();
     }
+  }
+}
+
+static inline bool sequenceHasActiveWork() {
+  return (currentMode != RoomMode::Idle) || relaySweep.sweep_active;
+}
+
+static void sequenceSetPaused(bool pauseRequested, uint32_t nowMs) {
+  if (!pauseRequested) {
+    if (sequencePauseActive) {
+      uint32_t pausedForMs = (uint32_t)(nowMs - sequencePauseStartedMs);
+      if (currentMode != RoomMode::Idle && currentStep != Step::None) {
+        stepStartMs += (unsigned long)pausedForMs;
+      }
+      if (relaySweep.sweep_active) {
+        relaySweep.last_transition_ms += pausedForMs;
+      }
+      sequencePauseActive = false;
+    }
+    return;
+  }
+
+  if (!sequenceHasActiveWork()) {
+    sequencePauseActive = false;
+    return;
+  }
+
+  if (!sequencePauseActive) {
+    sequencePauseActive = true;
+    sequencePauseStartedMs = nowMs;
+  }
+}
+
+static inline void sequencePauseAutoTimeout(uint32_t nowMs) {
+  if (!sequencePauseActive) return;
+  if ((uint32_t)(nowMs - sequencePauseStartedMs) >= SEQUENCE_PAUSE_TIMEOUT_MS) {
+    sequenceSetPaused(false, nowMs);
+    mb_write(HR_STEP, (uint16_t)currentStep);
   }
 }
 
@@ -2189,9 +2231,9 @@ void setup() {
   }
 
   // Minimal, safe register map:
-  // - Coils 0..7: momentary commands from HMI/Pi
+  // - Coils 0..8: commands from HMI/Pi (coil8 is level pause/resume)
   // - Holding regs 0..199: allows reads of HR10..HR20 and HR120.. with no crashes
-  modbusTCPServer.configureCoils(0, 8);
+  modbusTCPServer.configureCoils(0, 9);
   modbusTCPServer.configureHoldingRegisters(0, HOLDING_REGS_SIZE);
 
   if (Serial) {
@@ -2201,7 +2243,7 @@ void setup() {
   }
 
   // Initialize coils low
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 9; i++) {
     (void)modbusTCPServer.coilWrite(i, 0);
   }
 
@@ -2542,6 +2584,7 @@ void loop() {
     int coil5 = modbusTCPServer.coilRead(COIL_CMD_CALIBRATE_ABORT);
     int coil6 = modbusTCPServer.coilRead(COIL_CMD_STOP_ALL_OUTPUTS);
     int coil7 = modbusTCPServer.coilRead(COIL_CMD_MANUAL_OUTPUT_APPLY);
+    int coil8 = modbusTCPServer.coilRead(COIL_CMD_SEQUENCE_PAUSE);
 
     bool stopAllThisCycle = false;
 
@@ -2580,6 +2623,8 @@ void loop() {
 
       setAllOutputsOff();
       relaySweepStop();
+      sequencePauseActive = false;
+      (void)modbusTCPServer.coilWrite(COIL_CMD_SEQUENCE_PAUSE, 0);
       pendingAerationPart2Time = 0;
       currentMode = RoomMode::Idle;
       currentStep = Step::None;
@@ -2649,6 +2694,17 @@ void loop() {
       relaySweepStop();
     } else if (coil4Edge && coil4 && currentMode != RoomMode::Idle && !relaySweep.sweep_active) {
       if (LOG_SWEEP_EVENTS) Serial.println("[MB] coil4=1 ignored (not Idle)");
+    }
+
+    // Level pause control: keep currently active outputs energized and freeze timers.
+    if (coil8 >= 0) {
+      uint32_t nowMs = millis();
+      if ((coil8 != 0) && !sequenceHasActiveWork()) {
+        (void)modbusTCPServer.coilWrite(COIL_CMD_SEQUENCE_PAUSE, 0);
+        sequencePauseActive = false;
+      } else {
+        sequenceSetPaused(coil8 != 0, nowMs);
+      }
     }
 
     // Periodic Modbus health summary (low impact)
@@ -2730,35 +2786,40 @@ void loop() {
 
   // USER button logic removed; measurement starts via Modbus coil 0 from HMI
 
-  switch (currentMode) {
-    case RoomMode::Measuring:
-      handleMeasurement();
-      break;
+  uint32_t nowMs = millis();
+  sequencePauseAutoTimeout(nowMs);
 
-    case RoomMode::Aerating:
-      handleAeration();
-      break;
+  if (!sequencePauseActive) {
+    switch (currentMode) {
+      case RoomMode::Measuring:
+        handleMeasurement();
+        break;
 
-    case RoomMode::ScrubbingCfg1:
-      handleScrubCfg1();
-      break;
+      case RoomMode::Aerating:
+        handleAeration();
+        break;
 
-    case RoomMode::ScrubbingCfg2:
-      handleScrubCfg2();
-      break;
+      case RoomMode::ScrubbingCfg1:
+        handleScrubCfg1();
+        break;
 
-    case RoomMode::Calibrating:
-      handleCalibration();
-      break;
+      case RoomMode::ScrubbingCfg2:
+        handleScrubCfg2();
+        break;
 
-    case RoomMode::Idle:
-    default:
-      // Later: schedule cycles or respond to HMI commands here
-      break;
+      case RoomMode::Calibrating:
+        handleCalibration();
+        break;
+
+      case RoomMode::Idle:
+      default:
+        // Later: schedule cycles or respond to HMI commands here
+        break;
+    }
+
+    // Drive relay sweep state machine when active
+    relaySweepTick(nowMs);
   }
-
-  // Drive relay sweep state machine when active
-  relaySweepTick(millis());
 
   // Optional: print latest readings/heartbeat
   #if 1
