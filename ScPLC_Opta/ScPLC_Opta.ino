@@ -119,6 +119,7 @@ static inline bool isHoldingRegWritable(uint16_t addr) {
   if (addr == 53) return true; // sweep select mask (12-bit)
   if (addr == 54) return true; // calibration duration (seconds)
   if (addr == 55) return true; // measurement duration (seconds)
+  if (addr == 56) return true; // aeration part2 duration (seconds)
 
   // Control ownership arbitration (reserved for Option B later)
   if (addr == 100 || addr == 101 || addr == 105) return true; // CONTROL_OWNER / CONTROL_CMD_ID / HMI_HEARTBEAT
@@ -287,6 +288,9 @@ const unsigned long SAFE_ABORT_MS = 1500UL;
 // Aeration
 const unsigned long AER_PART1_TIME_MS = 10000UL;    // 10 s
 const unsigned long AER_PER_0_1PCT_MS = 20000UL;    // 20 s per 0.1% below setpoint
+const unsigned long AERATION_PART2_TIME_MS_DEFAULT = 60000UL; // 60 s (manual/test aeration)
+const unsigned long AERATION_PART2_TIME_MS_MIN = 1000UL; // 1 s
+const unsigned long AERATION_PART2_TIME_MS_MAX = 3600000UL; // 60 minutes
 
 // Scrub Configuration 1
 const unsigned long CFG1_ADSREG1_MS  = 50000UL;
@@ -352,6 +356,20 @@ static inline unsigned long clampMeasurementDurationMs(unsigned long valueMs) {
 static inline uint16_t clampMeasurementDurationS(uint32_t valueS) {
   uint32_t minS = (uint32_t)(MEASUREMENT_TIME_MS_MIN / 1000UL);
   uint32_t maxS = (uint32_t)(MEASUREMENT_TIME_MS_MAX / 1000UL);
+  if (valueS < minS) return (uint16_t)minS;
+  if (valueS > maxS) return (uint16_t)maxS;
+  return (uint16_t)valueS;
+}
+
+static inline unsigned long clampAerationPart2DurationMs(unsigned long valueMs) {
+  if (valueMs < AERATION_PART2_TIME_MS_MIN) return AERATION_PART2_TIME_MS_MIN;
+  if (valueMs > AERATION_PART2_TIME_MS_MAX) return AERATION_PART2_TIME_MS_MAX;
+  return valueMs;
+}
+
+static inline uint16_t clampAerationPart2DurationS(uint32_t valueS) {
+  uint32_t minS = (uint32_t)(AERATION_PART2_TIME_MS_MIN / 1000UL);
+  uint32_t maxS = (uint32_t)(AERATION_PART2_TIME_MS_MAX / 1000UL);
   if (valueS < minS) return (uint16_t)minS;
   if (valueS > maxS) return (uint16_t)maxS;
   return (uint16_t)valueS;
@@ -428,6 +446,7 @@ IPAddress optaSubnet(255, 255, 255, 0);
 //  - HR53      (u16):    sweep select mask (clamped 0x0000..0x0FFF; 0=>ALL at runtime)
 //  - HR54      (u16 s):  calibration duration (clamped 60..3600)
 //  - HR55      (u16 s):  measurement duration (clamped 1..3600)
+//  - HR56      (u16 s):  aeration part2 duration (clamped 1..3600)
 //  - HR100..101 (u16):   Control ownership arbitration
 //                      HR100 = CONTROL_OWNER (0=NONE, 1=HMI, 2=PI)
 //                      HR101 = CONTROL_CMD_ID (caller-provided u16 tag; Opta may overwrite)
@@ -452,6 +471,7 @@ const uint16_t COIL_CMD_CALIBRATE_ABORT  = 5; // 00006 (edge-triggered abort dur
 const uint16_t COIL_CMD_STOP_ALL_OUTPUTS = 6; // 00007 (immediate stop: de-energize all outputs + Idle)
 const uint16_t COIL_CMD_MANUAL_OUTPUT_APPLY = 7; // 00008 (edge-triggered apply manual output state)
 const uint16_t COIL_CMD_SEQUENCE_PAUSE   = 8; // 00009 (level: 1=pause sequencing, 0=resume)
+const uint16_t COIL_CMD_AERATION_START   = 9; // 00010 (momentary: start aeration cycle)
 
 
 // Holding registers
@@ -508,6 +528,7 @@ const uint16_t HR_SWEEP_RELAY_ON_MS     = 52; // sweep relay ON dwell time (ms)
 const uint16_t HR_SWEEP_SELECT_MASK     = 53; // sweep select mask (u16; bits 0..11)
 const uint16_t HR_CAL_DURATION_S        = 54; // calibration duration (seconds)
 const uint16_t HR_MEAS_DURATION_S       = 55; // measurement duration (seconds)
+const uint16_t HR_AERATION_PART2_DURATION_S = 56; // aeration part2 duration (seconds)
 const uint16_t HR_SCRUB_CFG1_ADSREG1_S  = 72;
 const uint16_t HR_SCRUB_CFG1_ADSREG2_S  = 73;
 const uint16_t HR_SCRUB_CFG1_XTRREGEN_S = 74;
@@ -1973,6 +1994,20 @@ void startAerationCycle(float o2ErrorPercent) {
   mb_write(HR_STEP,      (uint16_t)currentStep);
 }
 
+void startAerationCycleManual() {
+  uint16_t part2S = holdingRegs[HR_AERATION_PART2_DURATION_S];
+  part2S = clampAerationPart2DurationS((uint32_t)part2S);
+  pendingAerationPart2Time = clampAerationPart2DurationMs((unsigned long)part2S * 1000UL);
+
+  setAllOutputsOff();
+  applyAerationPart1Outputs();
+  startStep(Step::AerationPart1, AER_PART1_TIME_MS);
+  currentMode = RoomMode::Aerating;
+  // Reflect state into Modbus holding registers immediately
+  mb_write(HR_ROOM_MODE, (uint16_t)currentMode);
+  mb_write(HR_STEP,      (uint16_t)currentStep);
+}
+
 void handleAeration() {
   if (!stepTimeElapsed()) {
     return;
@@ -2260,9 +2295,9 @@ void setup() {
   }
 
   // Minimal, safe register map:
-  // - Coils 0..8: commands from HMI/Pi (coil8 is level pause/resume)
+  // - Coils 0..9: commands from HMI/Pi (coil8 is level pause/resume)
   // - Holding regs 0..199: allows reads of HR10..HR20 and HR120.. with no crashes
-  modbusTCPServer.configureCoils(0, 9);
+  modbusTCPServer.configureCoils(0, 10);
   modbusTCPServer.configureHoldingRegisters(0, HOLDING_REGS_SIZE);
 
   if (Serial) {
@@ -2272,7 +2307,7 @@ void setup() {
   }
 
   // Initialize coils low
-  for (int i = 0; i < 9; i++) {
+  for (int i = 0; i < 10; i++) {
     (void)modbusTCPServer.coilWrite(i, 0);
   }
 
@@ -2309,6 +2344,7 @@ void setup() {
   mb_write(HR_SWEEP_RELAY_ON_MS, SWEEP_RELAY_ON_MS_DEFAULT);
   mb_write(HR_CAL_DURATION_S, (uint16_t)(CALIBRATION_TIME_MS_DEFAULT / 1000UL));
   mb_write(HR_MEAS_DURATION_S, (uint16_t)(MEASUREMENT_TIME_MS_DEFAULT / 1000UL));
+  mb_write(HR_AERATION_PART2_DURATION_S, (uint16_t)(AERATION_PART2_TIME_MS_DEFAULT / 1000UL));
   mb_write(HR_SCRUB_CFG1_ADSREG1_S,  (uint16_t)(CFG1_ADSREG1_MS / 1000UL));
   mb_write(HR_SCRUB_CFG1_ADSREG2_S,  (uint16_t)(CFG1_ADSREG2_MS / 1000UL));
   mb_write(HR_SCRUB_CFG1_XTRREGEN_S, (uint16_t)(CFG1_XTRREGEN_MS / 1000UL));
@@ -2589,7 +2625,7 @@ void loop() {
       }
     }
 
-    // Calibration/measurement duration clamp (RW registers HR54/HR55, seconds).
+    // Calibration/measurement/aeration duration clamp (RW registers HR54/HR55/HR56, seconds).
     {
       long rawDurationValue = modbusTCPServer.holdingRegisterRead((int)HR_CAL_DURATION_S);
       {
@@ -2601,6 +2637,16 @@ void loop() {
             mb_write(HR_MEAS_DURATION_S, clamped);
           }
           measurementTimeMs = clampMeasurementDurationMs((unsigned long)clamped * 1000UL);
+        }
+      }
+      {
+        long rawAerDurationValue = modbusTCPServer.holdingRegisterRead((int)HR_AERATION_PART2_DURATION_S);
+        if (rawAerDurationValue >= 0) {
+          uint16_t raw = (uint16_t)rawAerDurationValue;
+          uint16_t clamped = clampAerationPart2DurationS((uint32_t)raw);
+          if (raw != clamped || holdingRegs[HR_AERATION_PART2_DURATION_S] != clamped) {
+            mb_write(HR_AERATION_PART2_DURATION_S, clamped);
+          }
         }
       }
       if (rawDurationValue >= 0) {
@@ -2656,6 +2702,7 @@ void loop() {
     int coil6 = modbusTCPServer.coilRead(COIL_CMD_STOP_ALL_OUTPUTS);
     int coil7 = modbusTCPServer.coilRead(COIL_CMD_MANUAL_OUTPUT_APPLY);
     int coil8 = modbusTCPServer.coilRead(COIL_CMD_SEQUENCE_PAUSE);
+    int coil9 = modbusTCPServer.coilRead(COIL_CMD_AERATION_START);
 
     bool stopAllThisCycle = false;
 
@@ -2663,6 +2710,11 @@ void loop() {
       (void)modbusTCPServer.coilWrite(COIL_CMD_MEASURE_START, 0);
       if (LOG_ACTIONS) Serial.println("[MB] coil0=1 -> startMeasurementCycle");
       if (currentMode == RoomMode::Idle) startMeasurementCycle();
+    }
+    if (coil9) {
+      (void)modbusTCPServer.coilWrite(COIL_CMD_AERATION_START, 0);
+      if (LOG_ACTIONS) Serial.println("[MB] coil9=1 -> startAerationCycleManual");
+      if (currentMode == RoomMode::Idle) startAerationCycleManual();
     }
     if (coil1) {
       (void)modbusTCPServer.coilWrite(COIL_CMD_CALIBRATE_START, 0);
